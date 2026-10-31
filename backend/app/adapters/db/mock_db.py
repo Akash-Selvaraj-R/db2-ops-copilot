@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 import time
-from typing import Any
+from typing import Any, Sequence
 
 from app.adapters.base import (
     ProbeResult,

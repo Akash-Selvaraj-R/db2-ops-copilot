@@ -96,7 +96,13 @@ def detect_prompt_injection(text: str) -> tuple[str, ...]:
 
 
 def screen_message(text: str, mode: str = "block") -> InjectionVerdict:
-    """Screen a message according to ``mode``; raise when blocking."""
+    """Screen a message according to ``mode``; raise when blocking.
+
+    ``off`` disables detection entirely (documented contract); ``flag``
+    detects but processes; ``block`` detects and rejects with HTTP 400.
+    """
+    if mode == "off":
+        return InjectionVerdict(flagged=False, rule_ids=(), mode=mode)
     rule_ids = detect_prompt_injection(text)
     verdict = InjectionVerdict(flagged=bool(rule_ids), rule_ids=rule_ids, mode=mode)
     if verdict.flagged and mode == "block":
