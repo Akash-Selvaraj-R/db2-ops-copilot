@@ -1,0 +1,140 @@
+"""Application settings — environment-driven configuration.
+
+Design rules (M1):
+- Every value is overridable via environment variable (pydantic-settings).
+- Secrets are ``SecretStr`` and never serialized into API responses.
+- Safe defaults make the app start with ZERO external services (mock adapters).
+- Placeholders only in committed examples — never real credentials.
+"""
+
+from __future__ import annotations
+
+from functools import lru_cache
+from typing import Literal
+
+from pydantic import Field, SecretStr, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+EnvironmentName = Literal["development", "testing", "production"]
+AdapterMode = Literal["mock", "real"]
+InjectionMode = Literal["off", "flag", "block"]
+
+
+def _split_csv(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+class Settings(BaseSettings):
+    """Effective runtime configuration (env vars > .env file > defaults)."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+        populate_by_name=True,
+    )
+
+    # --- Application -------------------------------------------------------
+    app_name: str = "Db2 Ops Copilot"
+    app_version: str = "0.1.0"
+    environment: EnvironmentName = "development"
+    debug: bool = True
+    api_v1_prefix: str = "/api/v1"
+    # Comma-separated in env; list in Python.
+    cors_origins: str = "http://127.0.0.1:5173,http://localhost:5173"
+    serve_frontend: bool = True
+    log_level: str = "INFO"
+    log_file: str = ""
+
+    # --- Adapter selection -------------------------------------------------
+    # "mock" (default) = fully offline development/testing.
+    # "real"          = Db2 + Ollama + LangChain integrations (requires
+    #                   requirements-integration.txt and running services).
+    adapter_mode: AdapterMode = "mock"
+
+    # --- IBM Db2 (target of the real database adapter) ---------------------
+    # Names match the root .env.example. Never put real values in git.
+    db2_host: str = Field(default="127.0.0.1", validation_alias="DB2_HOST")
+    db2_port: int = Field(default=50000, validation_alias="DB2_PORT")
+    db2_dbname: str = Field(default="testdb", validation_alias="DB2_DBNAME")
+    db2_ro_user: str = Field(default="db2ro", validation_alias="DB2_RO_USER")
+    db2_ro_password: SecretStr = Field(
+        default=SecretStr(""), validation_alias="DB2_RO_PASSWORD"
+    )
+    db2_connect_timeout_ms: int = 3000
+
+    # --- Ollama models -----------------------------------------------------
+    ollama_base_url: str = Field(
+        default="http://127.0.0.1:11434", validation_alias="OLLAMA_BASE_URL"
+    )
+    ollama_llm_model: str = Field(
+        default="granite4.2:3b", validation_alias="OLLAMA_LLM_MODEL"
+    )
+    ollama_embed_model: str = Field(
+        default="nomic-embed-text:v1.5", validation_alias="OLLAMA_EMBED_MODEL"
+    )
+    ollama_timeout_ms: int = 30000
+    embedding_dimensions: int = 768  # nomic-embed-text:v1.5
+
+    # --- SQL security policy (see docs/ARCHITECTURE.md §Security) ----------
+    sql_max_length: int = 5000
+    sql_max_ast_nodes: int = 500
+    sql_max_subqueries: int = 6
+    sql_max_joins: int = 8
+    sql_max_in_list: int = 200
+    sql_max_rows: int = 100
+    sql_query_timeout_ms: int = 10000
+    sql_enforce_row_limit: bool = True
+    # Comma-separated schemas the generated-SQL guard must never touch.
+    sql_denied_schemas: str = (
+        "SYSCAT,SYSIBM,SYSSTAT,SYSPROC,SYSIBMADM,SYSIBMSECURITY,SYSTOOLS"
+    )
+
+    # --- Security / prompt-injection ---------------------------------------
+    injection_mode: InjectionMode = "block"
+    security_max_message_length: int = 4000
+
+    # --- Non-secret view of DB state for the dashboard ----------------------
+    # (host/port/name are not credentials; passwords are NEVER exposed.)
+
+    @field_validator(
+        "cors_origins", "sql_denied_schemas", mode="before"
+    )
+    @classmethod
+    def _coerce_csv(cls, value: object) -> object:
+        if isinstance(value, (list, tuple)):
+            return ",".join(str(v) for v in value)
+        return value
+
+    @field_validator("log_level")
+    @classmethod
+    def _upper_log_level(cls, value: str) -> str:
+        level = value.upper()
+        if level not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}:
+            raise ValueError(f"invalid log level: {value}")
+        return level
+
+    # Derived properties ---------------------------------------------------
+    @property
+    def cors_origins_list(self) -> list[str]:
+        return _split_csv(self.cors_origins)
+
+    @property
+    def denied_schemas_list(self) -> list[str]:
+        return [s.upper() for s in _split_csv(self.sql_denied_schemas)]
+
+    @property
+    def is_mock(self) -> bool:
+        return self.adapter_mode == "mock"
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """Cached settings accessor (dependency-injection friendly)."""
+    return Settings()
+
+
+def reset_settings_cache() -> None:
+    """Clear the cache — used by tests after mutating the environment."""
+    get_settings.cache_clear()

@@ -1,0 +1,259 @@
+"""Adapter contracts — the clean interfaces between the app and its integrations.
+
+Every external concern is expressed as a Protocol so the application core never
+imports a driver, SDK or framework directly:
+
+1. Db2 database connectivity        -> ``DatabaseAdapter``
+2. Db2 vector-store operations      -> ``VectorStoreAdapter``
+3. Ollama chat model                -> ``ChatModelAdapter``
+4. Ollama embedding model           -> ``EmbeddingModelAdapter``
+5. LangChain orchestration          -> ``OrchestrationAdapter``
+6. SQL validation                   -> ``SqlValidator``
+7. Audit persistence                -> ``AuditAdapter``
+
+Two implementations exist for each service adapter:
+
+- ``mock_*``   — deterministic, in-memory, fully offline (development/tests).
+- real ones    — lazy-import their driver and report ``unavailable`` via
+                 ``ping()`` when the dependency/service is missing (M2+).
+
+Mocks are NEVER the production implementation: ``ADAPTER_MODE=real`` selects
+the real adapters (see ``app.adapters.registry``).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Literal, Protocol, Sequence, runtime_checkable
+
+from app.schemas.sql import SqlValidateResponse
+
+ProbeStatus = Literal["ok", "degraded", "unavailable"]
+AdapterKind = Literal["mock", "real"]
+Intent = Literal["docs", "data", "general"]
+
+
+# --------------------------------------------------------------------------
+# Shared value objects
+# --------------------------------------------------------------------------
+@dataclass(slots=True)
+class ProbeResult:
+    name: str
+    status: ProbeStatus
+    mode: AdapterKind
+    latency_ms: float
+    detail: str
+
+
+@dataclass(slots=True)
+class QueryResult:
+    columns: list[str]
+    rows: list[list[Any]]
+    row_count: int
+    truncated: bool
+    latency_ms: float = 0.0
+
+
+@dataclass(slots=True)
+class SchemaColumn:
+    name: str
+    data_type: str
+    nullable: bool = True
+
+
+@dataclass(slots=True)
+class SchemaTable:
+    name: str
+    schema_name: str | None
+    columns: list[SchemaColumn] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class SchemaSnapshot:
+    tables: list[SchemaTable]
+    source: str  # "mock" | "SYSCAT"
+    latency_ms: float = 0.0
+
+
+@dataclass(slots=True)
+class DocumentInput:
+    text: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class VectorHit:
+    content: str
+    score: float
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class ModelResult:
+    text: str
+    model: str
+    latency_ms: float
+    usage: dict[str, int] | None = None
+
+
+@dataclass(slots=True)
+class EmbeddingResult:
+    vectors: list[list[float]]
+    model: str
+    dimensions: int
+    latency_ms: float
+
+
+@dataclass(slots=True)
+class CitationDraft:
+    source: str
+    title: str
+    snippet: str
+    score: float | None = None
+
+
+@dataclass(slots=True)
+class OrchestratorResult:
+    reply: str
+    intent: Intent
+    citations: list[CitationDraft] = field(default_factory=list)
+    sql: str | None = None
+    retrieval_ms: int | None = None
+    generation_ms: int | None = None
+
+
+@dataclass(slots=True)
+class AuditRecord:
+    intent: str
+    question: str
+    status: str
+    latency_ms: int
+    detail: str | None = None
+    request_id: str | None = None
+    id: int = 0
+    timestamp: str = ""
+
+
+# --------------------------------------------------------------------------
+# Protocols (the actual contracts)
+# --------------------------------------------------------------------------
+@runtime_checkable
+class DatabaseAdapter(Protocol):
+    """Read-only Db2 connectivity (execute + schema introspection)."""
+
+    probe_name: str
+    provider_id: str
+    mode: AdapterKind
+
+    def ping(self) -> ProbeResult: ...
+
+    def execute_readonly(
+        self,
+        sql: str,
+        params: Sequence[Any] | None = None,
+        timeout_ms: int | None = None,
+    ) -> QueryResult: ...
+
+    def fetch_schema(self) -> SchemaSnapshot: ...
+
+    def close(self) -> None: ...
+
+
+@runtime_checkable
+class VectorStoreAdapter(Protocol):
+    """Db2-backed vector store operations (DB2VS in real mode)."""
+
+    probe_name: str
+    provider_id: str
+    mode: AdapterKind
+
+    def ping(self) -> ProbeResult: ...
+
+    def similarity_search(
+        self, query: str, k: int = 4, filters: dict[str, Any] | None = None
+    ) -> list[VectorHit]: ...
+
+    def upsert_documents(self, documents: list[DocumentInput]) -> int: ...
+
+    def count(self) -> int: ...
+
+    def close(self) -> None: ...
+
+
+@runtime_checkable
+class ChatModelAdapter(Protocol):
+    """Chat/completion model (Ollama in real mode)."""
+
+    probe_name: str
+    provider_id: str
+    mode: AdapterKind
+
+    def ping(self) -> ProbeResult: ...
+
+    def generate(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        temperature: float = 0.0,
+        max_tokens: int = 512,
+    ) -> ModelResult: ...
+
+    def close(self) -> None: ...
+
+
+@runtime_checkable
+class EmbeddingModelAdapter(Protocol):
+    """Embedding model (nomic-embed-text via Ollama in real mode)."""
+
+    probe_name: str
+    provider_id: str
+    mode: AdapterKind
+
+    def ping(self) -> ProbeResult: ...
+
+    def embed(self, texts: list[str]) -> EmbeddingResult: ...
+
+    @property
+    def dimensions(self) -> int: ...
+
+    def close(self) -> None: ...
+
+
+@runtime_checkable
+class OrchestrationAdapter(Protocol):
+    """Pipeline orchestration (LangChain in real mode)."""
+
+    probe_name: str
+    provider_id: str
+    mode: AdapterKind
+
+    def ping(self) -> ProbeResult: ...
+
+    def respond(self, message: str, mode: str = "auto") -> OrchestratorResult: ...
+
+    def close(self) -> None: ...
+
+
+@runtime_checkable
+class SqlValidator(Protocol):
+    """AST-based SQL validation gate (local compute — always 'real')."""
+
+    def validate(self, sql: str) -> SqlValidateResponse: ...
+
+
+@runtime_checkable
+class AuditAdapter(Protocol):
+    """Audit persistence (APP_AUDIT table in Db2 in real mode)."""
+
+    probe_name: str
+    provider_id: str
+    mode: AdapterKind
+
+    def ping(self) -> ProbeResult: ...
+
+    def record(self, entry: AuditRecord) -> int: ...
+
+    def list_recent(self, limit: int = 50) -> list[AuditRecord]: ...
+
+    def close(self) -> None: ...
