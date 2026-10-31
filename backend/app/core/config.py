@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     # --- IBM Db2 (target of the real database adapter) ---------------------
     # Names match the root .env.example. Never put real values in git.
     db2_host: str = Field(default="127.0.0.1", validation_alias="DB2_HOST")
-    db2_port: int = Field(default=50000, validation_alias="DB2_PORT")
+    db2_port: int = Field(default=50000, validation_alias="DB2_PORT", ge=1, le=65535)
     db2_dbname: str = Field(default="testdb", validation_alias="DB2_DBNAME")
     db2_ro_user: str = Field(default="db2ro", validation_alias="DB2_RO_USER")
     db2_ro_password: SecretStr = Field(
