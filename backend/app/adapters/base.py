@@ -132,6 +132,30 @@ class AuditRecord:
     request_id: str | None = None
     id: int = 0
     timestamp: str = ""
+    # M2 extensions — persisted into the extended APP_AUDIT schema:
+    operation: str = "chat"  # chat | sql_validate | sql_execute | ...
+    session_id: str | None = None
+    sql_text: str | None = None
+    # Sanitized JSON (never passwords/tokens/DSNs — adapters re-sanitize).
+    metadata: str | None = None
+
+
+@dataclass(slots=True)
+class ExecutionRecord:
+    """One row of APP.QUERY_EXECUTIONS (history of executed/rejected queries)."""
+
+    sql: str
+    validation_status: str  # PASSED | REJECTED
+    explain_status: str | None = None  # OK | FAILED | SKIPPED | DISABLED
+    execution_status: str = "NOT_EXECUTED"  # OK | ERROR | TIMEOUT | REJECTED
+    row_count: int | None = None
+    truncated: bool = False
+    latency_ms: int = 0
+    sqlstate: str | None = None
+    request_id: str | None = None
+    detail: str | None = None
+    id: int = 0
+    timestamp: str = ""
 
 
 # --------------------------------------------------------------------------
@@ -154,7 +178,20 @@ class DatabaseAdapter(Protocol):
         timeout_ms: int | None = None,
     ) -> QueryResult: ...
 
+    def explain(self, sql: str, timeout_ms: int | None = None) -> bool:
+        """Best-effort EXPLAIN dry-run for an already-validated statement.
+
+        Returns True when the server accepted the plan, False otherwise.
+        NEVER raises: the dry-run is advisory (accounts often lack EXPLAIN
+        privileges / plan tables) and must not block execution.
+        """
+
     def fetch_schema(self) -> SchemaSnapshot: ...
+
+    # Execution history (APP.QUERY_EXECUTIONS in real mode, memory in mock).
+    def record_execution(self, record: ExecutionRecord) -> int: ...
+
+    def list_executions(self, limit: int = 20) -> list[ExecutionRecord]: ...
 
     def close(self) -> None: ...
 
@@ -174,6 +211,8 @@ class VectorStoreAdapter(Protocol):
     ) -> list[VectorHit]: ...
 
     def upsert_documents(self, documents: list[DocumentInput]) -> int: ...
+
+    def delete(self, ids: list[str]) -> int: ...
 
     def count(self) -> int: ...
 

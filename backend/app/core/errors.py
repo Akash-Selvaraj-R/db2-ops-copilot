@@ -63,6 +63,17 @@ class NotFoundError(AppError):
     status_code = 404
 
 
+class SqlRejectedError(AppError):
+    """The SQL validation gate rejected a statement before execution.
+
+    Raised by ``POST /api/v1/sql/execute`` — the rejection is persisted to
+    APP.QUERY_EXECUTIONS and APP_AUDIT before raising.
+    """
+
+    code = "SQL_REJECTED"
+    status_code = 422
+
+
 class UpstreamTimeoutError(AppError):
     code = "UPSTREAM_TIMEOUT"
     status_code = 504

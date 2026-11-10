@@ -13,6 +13,7 @@ from app.adapters.registry import AdapterRegistry
 from app.core.config import Settings, get_settings
 from app.services.chat_service import ChatService
 from app.services.health_service import HealthService
+from app.services.sql_execution_service import SqlExecutionService
 from app.services.sql_guard_service import SqlGuardService
 from app.services.status_service import StatusService
 
@@ -43,3 +44,10 @@ def build_chat_service(request: Request) -> ChatService:
 
 def build_sql_guard(request: Request) -> SqlGuardService:
     return SqlGuardService(get_registry(request).validator)
+
+
+def build_sql_execution(request: Request) -> SqlExecutionService:
+    registry = get_registry(request)
+    return SqlExecutionService(
+        get_settings(), registry, SqlGuardService(registry.validator)
+    )

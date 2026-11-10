@@ -40,6 +40,8 @@ built frontend automatically when `frontend/dist` exists (`npm run build`).
 | `GET /api/v1/config` | Effective **non-secret** configuration |
 | `POST /api/v1/chat` | Copilot flow (RAG / text-to-SQL, auto-routed) |
 | `POST /api/v1/sql/validate` | The SQL safety gate, exposed for the UI |
+| `POST /api/v1/sql/execute` | Validated, row-capped, timed, audited read-only execution |
+| `GET /api/v1/ready` | Readiness gate (503 when any probe is not ok) |
 | `GET /api/v1/audit` | Recent audit entries |
 
 Interactive docs: http://127.0.0.1:8000/docs · Full contract: [`docs/API_CONTRACT.md`](docs/API_CONTRACT.md)
@@ -76,7 +78,7 @@ Copy `.env.example` to `.env` and fill in locally — **never commit `.env`**
 ## Testing
 
 ```bash
-.venv\Scripts\python -m pytest backend/tests -q   # 100 offline tests
+.venv\Scripts\python -m pytest backend/tests -q   # 160 offline tests
 cd frontend && npm run build                      # strict TS + production bundle
 ```
 

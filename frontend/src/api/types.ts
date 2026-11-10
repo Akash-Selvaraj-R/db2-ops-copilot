@@ -124,6 +124,7 @@ export interface ConfigResponse {
 export interface AuditEntry {
   id: number;
   timestamp: string;
+  operation: string;
   intent: string;
   question: string;
   status: string;

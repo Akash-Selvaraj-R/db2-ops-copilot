@@ -44,3 +44,16 @@ class HealthResponse(StrictModel):
     uptime_seconds: float
     timestamp: str
     checks: list[Probe]
+
+
+class ReadyResponse(StrictModel):
+    """GET /api/v1/ready payload — same probes as /health, but the endpoint
+    returns HTTP 503 when ``status`` is ``not_ready`` (orchestrator gate)."""
+
+    status: Literal["ready", "not_ready"]
+    version: str
+    api_version: str
+    mode: Literal["mock", "real"]
+    uptime_seconds: float
+    timestamp: str
+    checks: list[Probe]

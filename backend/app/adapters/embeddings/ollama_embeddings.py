@@ -1,18 +1,30 @@
-"""REAL Ollama embedding-model adapter (``/api/embed``).
+"""REAL Ollama embedding-model adapter (M2 — Ollama REST API, ``/api/embed``).
 
-Status (M1): implemented against the documented Ollama HTTP API but NEVER
-called during M1 (no Ollama installation per the development constraint).
+Production behavior mirrors the chat adapter:
+- one reused ``httpx.Client`` (keep-alive) via :class:`OllamaHttpClient`,
+- bounded retry with backoff for transient failures only (M2.3),
+- request timeout from ``OLLAMA_TIMEOUT_MS``,
+- response normalization into :class:`EmbeddingResult` (vectors + dimension),
+- structured metadata logging (model, count, dimension, latency) — input
+  text is never logged,
+- actionable ``AdapterUnavailableError`` / ``UpstreamTimeoutError`` on
+  failure; no mock fallback, ever.
+
+Required model: ``nomic-embed-text:v1.5`` (768 dimensions by default).
+NEVER executed against a real Ollama server on the development machine.
 """
 
 from __future__ import annotations
 
+import logging
 import time
 
-import httpx
-
 from app.adapters.base import EmbeddingResult, ProbeResult
+from app.adapters.ollama_http import OllamaHttpClient
 from app.core.config import Settings
-from app.core.errors import AdapterUnavailableError, UpstreamTimeoutError
+from app.core.errors import AdapterUnavailableError
+
+logger = logging.getLogger(__name__)
 
 
 class OllamaEmbeddingsAdapter:
@@ -25,10 +37,11 @@ class OllamaEmbeddingsAdapter:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._closed = False
+        self._http = OllamaHttpClient(settings, "embeddings")
 
     @property
     def base_url(self) -> str:
-        return self._settings.ollama_base_url.rstrip("/")
+        return self._http.base_url
 
     @property
     def model_name(self) -> str:
@@ -40,7 +53,6 @@ class OllamaEmbeddingsAdapter:
 
     # -- probes -----------------------------------------------------------
     def ping(self) -> ProbeResult:
-        start = time.perf_counter()
         if self._closed:
             return ProbeResult(
                 name=self.probe_name,
@@ -49,16 +61,14 @@ class OllamaEmbeddingsAdapter:
                 latency_ms=0.0,
                 detail="Ollama adapter closed",
             )
-        elapsed = lambda: (time.perf_counter() - start) * 1000  # noqa: E731
+        start = time.perf_counter()
+
+        def elapsed() -> float:
+            return (time.perf_counter() - start) * 1000
+
         try:
-            response = httpx.get(f"{self.base_url}/api/tags", timeout=2.0)
-            response.raise_for_status()
-            names = {
-                m.get("name", "")
-                for m in response.json().get("models", [])
-                if isinstance(m, dict)
-            }
-        except (httpx.HTTPError, ValueError) as exc:
+            body = self._http.request_json("GET", "/api/tags")
+        except Exception as exc:  # noqa: BLE001 — probe must never raise
             return ProbeResult(
                 name=self.probe_name,
                 status="unavailable",
@@ -66,9 +76,15 @@ class OllamaEmbeddingsAdapter:
                 latency_ms=elapsed(),
                 detail=(
                     f"Ollama not reachable at {self.base_url} "
-                    f"({type(exc).__name__}). Install/start Ollama — DEPLOYMENT.md."
+                    f"({type(exc).__name__}: {exc}). Install/start Ollama — "
+                    "see docs/OLLAMA_INTEGRATION.md."
                 ),
             )
+        names = {
+            m.get("name", "")
+            for m in body.get("models", [])
+            if isinstance(m, dict)
+        }
         wanted = self.model_name
         if wanted not in names and not any(
             n.split(":")[0] == wanted.split(":")[0] for n in names
@@ -80,7 +96,7 @@ class OllamaEmbeddingsAdapter:
                 latency_ms=elapsed(),
                 detail=(
                     f"Ollama is running but embedding model '{wanted}' is not "
-                    "pulled (run: ollama pull nomic-embed-text:v1.5)."
+                    f"pulled (run: ollama pull {wanted})."
                 ),
             )
         return ProbeResult(
@@ -97,44 +113,45 @@ class OllamaEmbeddingsAdapter:
             raise AdapterUnavailableError("Ollama adapter is closed.")
         if not texts:
             return EmbeddingResult(
-                vectors=[], model=self.model_name, dimensions=self.dimensions, latency_ms=0.0
+                vectors=[],
+                model=self.model_name,
+                dimensions=self.dimensions,
+                latency_ms=0.0,
             )
         start = time.perf_counter()
-        try:
-            response = httpx.post(
-                f"{self.base_url}/api/embed",
-                json={"model": self.model_name, "input": texts},
-                timeout=self._settings.ollama_timeout_ms / 1000,
-            )
-            response.raise_for_status()
-            body = response.json()
-        except httpx.TimeoutException as exc:
-            raise UpstreamTimeoutError(
-                f"Ollama embedding request timed out after "
-                f"{self._settings.ollama_timeout_ms} ms."
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise AdapterUnavailableError(
-                f"Ollama embedding request to {self.base_url} failed: "
-                f"{type(exc).__name__}: {exc}"
-            ) from exc
-        except ValueError as exc:
-            raise AdapterUnavailableError(
-                f"Ollama returned a non-JSON response: {exc}"
-            ) from exc
+        body = self._http.request_json(
+            "POST",
+            "/api/embed",
+            json_body={"model": self.model_name, "input": texts},
+        )
+        latency_ms = (time.perf_counter() - start) * 1000
 
         vectors = body.get("embeddings")
-        if not isinstance(vectors, list):
+        if not isinstance(vectors, list) or not all(
+            isinstance(v, list) for v in vectors
+        ):
             raise AdapterUnavailableError(
                 "Ollama embedding response did not contain an 'embeddings' list."
             )
+        if len(vectors) != len(texts):
+            raise AdapterUnavailableError(
+                f"Ollama returned {len(vectors)} embeddings for {len(texts)} inputs."
+            )
         dimensions = len(vectors[0]) if vectors and vectors[0] else self.dimensions
+        logger.info(
+            "ollama embed ok model=%s count=%d dimensions=%d latency_ms=%.0f",
+            self.model_name,
+            len(vectors),
+            dimensions,
+            latency_ms,
+        )
         return EmbeddingResult(
             vectors=vectors,
             model=self.model_name,
             dimensions=dimensions,
-            latency_ms=(time.perf_counter() - start) * 1000,
+            latency_ms=latency_ms,
         )
 
     def close(self) -> None:
         self._closed = True
+        self._http.close()

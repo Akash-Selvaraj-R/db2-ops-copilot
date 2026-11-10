@@ -6,17 +6,21 @@ Used for development and automated tests. NOT the production implementation:
 
 from __future__ import annotations
 
+import dataclasses
 import re
+import threading
 import time
 from typing import Any, Sequence
 
 from app.adapters.base import (
+    ExecutionRecord,
     ProbeResult,
     QueryResult,
     SchemaColumn,
     SchemaSnapshot,
     SchemaTable,
 )
+from app.core.clock import utc_now_iso
 from app.core.config import Settings
 
 _FETCH_RE = re.compile(r"FETCH\s+FIRST\s+(\d+)\s+ROW", re.IGNORECASE)
@@ -46,6 +50,10 @@ class MockDatabaseAdapter:
     def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings or Settings()
         self._closed = False
+        self._lock = threading.Lock()
+        self._executions: list[ExecutionRecord] = []
+        self._next_execution_id = 1
+        self._execution_capacity = 500
 
     # -- lifecycle ------------------------------------------------------
     def ping(self) -> ProbeResult:
@@ -64,6 +72,36 @@ class MockDatabaseAdapter:
             latency_ms=0.0,
             detail="mock Db2 adapter ready (no real connection)",
         )
+
+    # -- explain dry-run (advisory) ------------------------------------------
+    def explain(self, sql: str, timeout_ms: int | None = None) -> bool:
+        """Offline stand-in for Db2 EXPLAIN: the statement is well-formed by
+        construction (it passed the gate), so the mock reports success."""
+        if self._closed:
+            return False
+        return True
+
+    # -- execution history (APP.QUERY_EXECUTIONS stand-in) ----------------
+    def record_execution(self, record: ExecutionRecord) -> int:
+        """Append an execution-history row (in-memory for the mock)."""
+        if self._closed:
+            raise RuntimeError("mock adapter closed")
+        with self._lock:
+            record.id = self._next_execution_id
+            self._next_execution_id += 1
+            if not record.timestamp:
+                record.timestamp = utc_now_iso()
+            # bounded history: keep the most recent rows only
+            self._executions.append(dataclasses.replace(record))
+            if len(self._executions) > self._execution_capacity:
+                self._executions = self._executions[-self._execution_capacity :]
+            return record.id
+
+    def list_executions(self, limit: int = 20) -> list[ExecutionRecord]:
+        with self._lock:
+            snapshot = list(self._executions)
+        snapshot.reverse()  # newest first
+        return [dataclasses.replace(r) for r in snapshot[: max(limit, 0)]]
 
     def close(self) -> None:
         self._closed = True
@@ -117,6 +155,7 @@ class MockDatabaseAdapter:
         )
 
     def fetch_schema(self) -> SchemaSnapshot:
+        """Mirror of database/migrations (001 + 004) for offline dev/tests."""
         return SchemaSnapshot(
             source="mock",
             tables=[
@@ -143,14 +182,15 @@ class MockDatabaseAdapter:
                     ],
                 ),
                 SchemaTable(
-                    name="KB_CHUNKS",
+                    # DB2VS-managed layout — exact DDL from langchain-db2's
+                    # _create_table (verified against package source).
+                    name="COPILOT_KB",
                     schema_name="APP",
                     columns=[
-                        SchemaColumn("ID", "INTEGER", False),
-                        SchemaColumn("CONTENT", "CLOB"),
+                        SchemaColumn("ID", "CHAR(16)", False),
+                        SchemaColumn("TEXT", "CLOB"),
+                        SchemaColumn("METADATA", "BLOB"),
                         SchemaColumn("EMBEDDING", "VECTOR(768, FLOAT32)", False),
-                        SchemaColumn("METADATA", "JSON"),
-                        SchemaColumn("CREATED_AT", "TIMESTAMP"),
                     ],
                 ),
                 SchemaTable(
@@ -159,11 +199,51 @@ class MockDatabaseAdapter:
                     columns=[
                         SchemaColumn("AUDIT_ID", "BIGINT", False),
                         SchemaColumn("REQ_TS", "TIMESTAMP"),
+                        SchemaColumn("ACTOR_TYPE", "VARCHAR(32)"),
+                        SchemaColumn("SESSION_ID", "VARCHAR(64)"),
+                        SchemaColumn("CLIENT_REQ_ID", "VARCHAR(64)"),
+                        SchemaColumn("OPERATION", "VARCHAR(32)"),
                         SchemaColumn("INTENT", "VARCHAR(16)"),
                         SchemaColumn("QUESTION", "CLOB"),
                         SchemaColumn("SQL_TEXT", "CLOB"),
-                        SchemaColumn("STATUS", "VARCHAR(16)"),
+                        SchemaColumn("STATUS", "VARCHAR(24)"),
                         SchemaColumn("LATENCY_MS", "INTEGER"),
+                        SchemaColumn("METADATA", "CLOB"),
+                    ],
+                ),
+                SchemaTable(
+                    name="DOCUMENT_METADATA",
+                    schema_name="APP",
+                    columns=[
+                        SchemaColumn("DOC_ID", "VARCHAR(64)", False),
+                        SchemaColumn("SOURCE", "VARCHAR(255)"),
+                        SchemaColumn("TITLE", "VARCHAR(255)"),
+                        SchemaColumn("URI", "VARCHAR(1024)"),
+                        SchemaColumn("CHUNK_INDEX", "INTEGER"),
+                        SchemaColumn("CHUNK_COUNT", "INTEGER"),
+                        SchemaColumn("CHAR_COUNT", "INTEGER"),
+                        SchemaColumn("CONTENT_HASH", "VARCHAR(64)"),
+                        SchemaColumn("METADATA", "CLOB"),
+                        SchemaColumn("CREATED_AT", "TIMESTAMP"),
+                        SchemaColumn("UPDATED_AT", "TIMESTAMP"),
+                    ],
+                ),
+                SchemaTable(
+                    name="QUERY_EXECUTIONS",
+                    schema_name="APP",
+                    columns=[
+                        SchemaColumn("EXECUTION_ID", "BIGINT", False),
+                        SchemaColumn("REQ_TS", "TIMESTAMP"),
+                        SchemaColumn("CLIENT_REQ_ID", "VARCHAR(64)"),
+                        SchemaColumn("SQL_TEXT", "CLOB"),
+                        SchemaColumn("VALIDATION_STATUS", "VARCHAR(16)"),
+                        SchemaColumn("EXPLAIN_STATUS", "VARCHAR(24)"),
+                        SchemaColumn("EXECUTION_STATUS", "VARCHAR(24)"),
+                        SchemaColumn("ROW_COUNT", "INTEGER"),
+                        SchemaColumn("TRUNCATED", "CHAR(1)"),
+                        SchemaColumn("LATENCY_MS", "INTEGER"),
+                        SchemaColumn("SQLSTATE_CODE", "CHAR(5)"),
+                        SchemaColumn("METADATA", "CLOB"),
                     ],
                 ),
             ],

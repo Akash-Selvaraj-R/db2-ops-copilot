@@ -18,6 +18,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 EnvironmentName = Literal["development", "testing", "production"]
 AdapterMode = Literal["mock", "real"]
 InjectionMode = Literal["off", "flag", "block"]
+VectorStrategy = Literal["cosine", "dot", "euclidean"]
 
 
 def _split_csv(value: str) -> list[str]:
@@ -63,6 +64,9 @@ class Settings(BaseSettings):
         default=SecretStr(""), validation_alias="DB2_RO_PASSWORD"
     )
     db2_connect_timeout_ms: int = 3000
+    # Schema that owns the application tables (APP_AUDIT, DEMO_*, COPILOT_KB).
+    # Introspection reads SYSCAT for THIS schema — not the login user's schema.
+    db2_app_schema: str = Field(default="APP", validation_alias="DB2_APP_SCHEMA")
 
     # --- Ollama models -----------------------------------------------------
     ollama_base_url: str = Field(
@@ -76,6 +80,20 @@ class Settings(BaseSettings):
     )
     ollama_timeout_ms: int = 30000
     embedding_dimensions: int = 768  # nomic-embed-text:v1.5
+    # Bounded retry for transient failures (connection resets, 5xx) — M2.3.
+    ollama_max_retries: int = Field(default=2, ge=0, le=5)
+    ollama_retry_backoff_ms: int = Field(default=250, ge=0, le=5000)
+
+    # --- Db2 vector store (langchain-db2 DB2VS) ----------------------------
+    # Table managed by DB2VS; created by migration 004 with the exact DDL the
+    # package itself would run (so the read-only account needs no CREATE).
+    vector_table_name: str = Field(
+        default="COPILOT_KB", validation_alias="VECTOR_TABLE_NAME"
+    )
+    # Db2 distance metric used by VECTOR_DISTANCE ranking.
+    vector_distance_strategy: VectorStrategy = Field(
+        default="cosine", validation_alias="VECTOR_DISTANCE_STRATEGY"
+    )
 
     # --- SQL security policy (see docs/ARCHITECTURE.md §Security) ----------
     sql_max_length: int = 5000
@@ -86,6 +104,9 @@ class Settings(BaseSettings):
     sql_max_rows: int = 100
     sql_query_timeout_ms: int = 10000
     sql_enforce_row_limit: bool = True
+    # Best-effort EXPLAIN dry-run before executing generated SQL (M2.6).
+    # Disabled automatically at runtime when the account lacks EXPLAIN rights.
+    sql_explain_dry_run: bool = True
     # Comma-separated schemas the generated-SQL guard must never touch.
     sql_denied_schemas: str = (
         "SYSCAT,SYSIBM,SYSSTAT,SYSPROC,SYSIBMADM,SYSIBMSECURITY,SYSTOOLS"
@@ -123,6 +144,16 @@ class Settings(BaseSettings):
     @property
     def denied_schemas_list(self) -> list[str]:
         return [s.upper() for s in _split_csv(self.sql_denied_schemas)]
+
+    @property
+    def app_schema(self) -> str:
+        """Uppercased application schema name (Db2 stores unquoted identifiers
+        upper-cased; SYSCAT comparisons are case-sensitive)."""
+        return self.db2_app_schema.strip().upper() or "APP"
+
+    @property
+    def qualified_app_table(self) -> str:
+        return f"{self.app_schema}.{self.vector_table_name.upper()}"
 
     @property
     def is_mock(self) -> bool:
