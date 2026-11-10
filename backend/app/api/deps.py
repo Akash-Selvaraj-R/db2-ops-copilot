@@ -12,6 +12,8 @@ from fastapi import Request
 from app.adapters.registry import AdapterRegistry
 from app.core.config import Settings, get_settings
 from app.services.chat_service import ChatService
+from app.services.dba_service import DbaService
+from app.services.explain_service import ExplainService
 from app.services.health_service import HealthService
 from app.services.sql_execution_service import SqlExecutionService
 from app.services.sql_guard_service import SqlGuardService
@@ -44,6 +46,17 @@ def build_chat_service(request: Request) -> ChatService:
 
 def build_sql_guard(request: Request) -> SqlGuardService:
     return SqlGuardService(get_registry(request).validator)
+
+
+def build_dba_service(request: Request) -> DbaService:
+    return DbaService(get_settings(), get_registry(request))
+
+
+def build_explain_service(request: Request) -> ExplainService:
+    registry = get_registry(request)
+    return ExplainService(
+        get_settings(), registry, SqlGuardService(registry.validator)
+    )
 
 
 def build_sql_execution(request: Request) -> SqlExecutionService:

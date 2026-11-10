@@ -26,13 +26,18 @@ import logging
 import re
 import socket
 import time
+import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
 from app.adapters.base import (
+    DbaToolResult,
     ExecutionRecord,
+    ExplainObject,
+    ExplainOperator,
+    ExplainResult,
     ProbeResult,
     QueryResult,
     SchemaColumn,
@@ -40,14 +45,24 @@ from app.adapters.base import (
     SchemaTable,
 )
 from app.core.config import Settings
-from app.core.errors import AdapterUnavailableError, UpstreamTimeoutError
+from app.core.errors import (
+    AdapterUnavailableError,
+    AppError,
+    DbError,
+    DbObjectNotFoundError,
+    DbPermissionError,
+    DbSqlError,
+    UpstreamTimeoutError,
+)
 from app.database.dsn import connect_args, sanitize
 
 logger = logging.getLogger(__name__)
 
+# SYSCAT.TABLES exposes the object kind in column TYPE ('T' table, 'V' view).
+# (An earlier revision filtered on a non-existent TABTYPE column.)
 _READ_TABLES_SQL = (
     "SELECT DISTINCT TABNAME FROM SYSCAT.TABLES "
-    "WHERE TABSCHEMA = ? AND TABTYPE IN ('T', 'V') ORDER BY TABNAME"
+    "WHERE TABSCHEMA = ? AND TYPE IN ('T', 'V') ORDER BY TABNAME"
 )
 
 _READ_COLUMNS_SQL = (
@@ -59,7 +74,8 @@ _READ_COLUMNS_SQL = (
 _SQLSTATE_CATEGORIES: tuple[tuple[str, str, str], ...] = (
     ("08", "connectivity", "connection ended unexpectedly — is the database active?"),
     ("28", "authentication", "invalid credentials — check DB2_RO_USER / DB2_RO_PASSWORD"),
-    ("425", "authorization", "user lacks the required privilege — check GRANTs (migration 003)"),
+    ("425", "authorization", "user lacks the required privilege — check GRANTs (migrations 003/005)"),
+    ("426", "syntax", "the statement is syntactically invalid for Db2"),
     ("427", "schema", "object does not exist — run database/migrations (see database/README.md)"),
     ("428", "sql-semantics", "the statement is not valid for this schema (type/column mismatch)"),
     ("570", "resource", "operation cancelled by the system (time/lock limit)"),
@@ -82,6 +98,21 @@ _MESSAGE_ID_TO_SQLSTATE: dict[str, str] = {
 
 _SQLSTATE_RE = re.compile(r"SQLSTATE[=:\s]+([0-9A-Z]{5})", re.IGNORECASE)
 _MESSAGE_ID_RE = re.compile(r"\bSQL(\d{4})N\b")
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+_OBJECT_KINDS = {"TA": "TABLE", "IX": "INDEX", "VW": "VIEW", "NK": "NICKNAME"}
+
+
+def _object_kind(value: Any) -> str:
+    code = str(value).strip().upper()
+    return _OBJECT_KINDS.get(code, code or "UNKNOWN")
 
 
 @dataclass(slots=True)
@@ -111,6 +142,12 @@ def classify_db_error(exc: BaseException) -> SqlErrorInfo:
             sqlstate = _MESSAGE_ID_TO_SQLSTATE.get(
                 message_id.group(1), "unknown"
             )
+    if sqlstate == "42703":  # undefined column: the statement is wrong (422), not a missing object
+        return SqlErrorInfo(
+            sqlstate=sqlstate,
+            category="sql-semantics",
+            hint="a referenced column does not exist — check the column names",
+        )
     for class_prefix, category, hint in _SQLSTATE_CATEGORIES:
         if sqlstate != "unknown" and sqlstate.startswith(class_prefix):
             if sqlstate == "57014":
@@ -123,6 +160,56 @@ def classify_db_error(exc: BaseException) -> SqlErrorInfo:
     return SqlErrorInfo(
         sqlstate=sqlstate, category="unknown", hint="see the Db2 message catalog"
     )
+
+
+def map_db_error(
+    exc: BaseException, settings: Settings, *, action: str, **extra: Any
+) -> AppError:
+    """Translate a driver exception into the API error taxonomy.
+
+    SQLSTATE category -> HTTP status:
+
+    =================  ===========================  ======
+    category           error                        status
+    =================  ===========================  ======
+    timeout (57014)    ``UpstreamTimeoutError``     504
+    authorization      ``DbPermissionError``        403
+    schema (427xx)     ``DbObjectNotFoundError``    404
+    syntax/semantics   ``DbSqlError``               422
+    connectivity/auth  ``AdapterUnavailableError``  503
+    resource/txn       ``AdapterUnavailableError``  503 (retryable)
+    anything else      ``DbError``                  502
+    =================  ===========================  ======
+
+    The message carries only the SQLSTATE, category and credential-stripped
+    driver text (``dsn.sanitize``).
+    """
+    info = classify_db_error(exc)
+    detail: dict[str, Any] = {
+        "sqlstate": info.sqlstate,
+        "category": info.category,
+        "hint": info.hint,
+        "error_type": type(exc).__name__,
+        **extra,
+    }
+    message = (
+        f"{action} failed [{info.category}, SQLSTATE {info.sqlstate}]: "
+        f"{sanitize(str(exc), settings)}"
+    )
+    if info.category == "timeout":
+        return UpstreamTimeoutError(
+            f"{action} exceeded the configured timeout [SQLSTATE {info.sqlstate}].",
+            detail=detail,
+        )
+    if info.category == "authorization":
+        return DbPermissionError(message, detail=detail)
+    if info.category == "schema":
+        return DbObjectNotFoundError(message, detail=detail)
+    if info.category in {"syntax", "sql-semantics"}:
+        return DbSqlError(message, detail=detail)
+    if info.category in {"connectivity", "authentication", "resource", "transaction"}:
+        return AdapterUnavailableError(message, detail=detail)
+    return DbError(message, detail=detail)
 
 
 class Db2DatabaseAdapter:
@@ -339,21 +426,8 @@ class Db2DatabaseAdapter:
         except AdapterUnavailableError:
             raise
         except Exception as exc:
-            info = classify_db_error(exc)
-            if info.category == "timeout":
-                raise UpstreamTimeoutError(
-                    "Query exceeded the configured timeout "
-                    f"[SQLSTATE {info.sqlstate}].",
-                    detail={"sqlstate": info.sqlstate, "hint": info.hint},
-                ) from exc
-            raise AdapterUnavailableError(
-                f"Query execution failed [{info.category}, "
-                f"SQLSTATE {info.sqlstate}]: {sanitize(str(exc), self._settings)}",
-                detail={
-                    "error_type": type(exc).__name__,
-                    "sqlstate": info.sqlstate,
-                    "hint": info.hint,
-                },
+            raise map_db_error(
+                exc, self._settings, action="Query execution"
             ) from exc
         finally:
             try:
@@ -404,11 +478,8 @@ class Db2DatabaseAdapter:
         except AdapterUnavailableError:
             raise
         except Exception as exc:
-            info = classify_db_error(exc)
-            raise AdapterUnavailableError(
-                f"Schema introspection failed [{info.category}, "
-                f"SQLSTATE {info.sqlstate}]: {sanitize(str(exc), self._settings)}",
-                detail={"schema": schema, "sqlstate": info.sqlstate},
+            raise map_db_error(
+                exc, self._settings, action="Schema introspection", schema=schema
             ) from exc
         finally:
             try:
@@ -416,42 +487,251 @@ class Db2DatabaseAdapter:
             except Exception:  # noqa: BLE001 — close is best-effort
                 pass
 
-    # -- execution history (APP.QUERY_EXECUTIONS) ---------------------------
-    def explain(self, sql: str, timeout_ms: int | None = None) -> bool:
-        """Best-effort ``EXPLAIN`` dry-run — advisory, never raises.
+    # -- DBA tools (catalog + monitoring) -------------------------------------
+    def run_dba_tool(
+        self,
+        tool_id: str,
+        sql: str,
+        params: Sequence[Any],
+        limit: int,
+    ) -> DbaToolResult:
+        """Run one FIXED tool template (``app.dba.specs``) with bound params.
 
-        The read-only account usually lacks EXPLAIN privileges or plan-table
-        access; failure is expected and simply reported as False so the
-        caller records ``explain_status=FAILED`` and executes anyway
-        (the validation gate + row/timeout caps are the real defenses).
+        ``sql`` must come from a ``ToolSpec`` — never from a user or a model.
+        User-controlled values travel only in ``params`` (qmark binding); the
+        row bound is enforced both in the template and by ``fetchmany``.
         """
         if self._closed:
-            return False
-        conn = None
+            raise AdapterUnavailableError("Db2 adapter is closed.")
+        start = time.perf_counter()
+        conn = self._connect()
+        try:
+            cursor = conn.cursor()
+            self._apply_timeout(cursor, self._settings.sql_query_timeout_ms)
+            cursor.execute(sql, tuple(params) if params else None)
+            rows = cursor.fetchmany(limit + 1) or []
+            columns = [d[0] for d in (cursor.description or [])]
+            truncated = len(rows) > limit
+            return DbaToolResult(
+                tool_id=tool_id,
+                source="db2",
+                columns=columns,
+                rows=[list(r) for r in rows[:limit]],
+                truncated=truncated,
+                latency_ms=(time.perf_counter() - start) * 1000,
+            )
+        except AdapterUnavailableError:
+            raise
+        except Exception as exc:
+            raise map_db_error(
+                exc, self._settings, action=f"DBA tool {tool_id}", tool=tool_id
+            ) from exc
+        finally:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001 — close is best-effort
+                pass
+
+    # -- EXPLAIN ---------------------------------------------------------------
+    # Explain-table access is by fixed templates: ``{es}`` is a validated plain
+    # identifier (Settings), the QUERYTAG is bound, and the statement text is
+    # the only interpolated value in ``EXPLAIN PLAN ... FOR`` (guarded below).
+    _EXPLAIN_KEYS = (
+        "S.EXPLAIN_REQUESTER = {a}.EXPLAIN_REQUESTER AND "
+        "S.EXPLAIN_TIME = {a}.EXPLAIN_TIME AND "
+        "S.SOURCE_NAME = {a}.SOURCE_NAME AND "
+        "S.SOURCE_SCHEMA = {a}.SOURCE_SCHEMA AND "
+        "S.SOURCE_VERSION = {a}.SOURCE_VERSION AND "
+        "S.EXPLAIN_LEVEL = {a}.EXPLAIN_LEVEL AND "
+        "S.STMTNO = {a}.STMTNO AND S.SECTNO = {a}.SECTNO"
+    )
+    _EXPLAIN_STMT_SQL = (
+        "SELECT S.TOTAL_COST FROM {es}.EXPLAIN_STATEMENT S "
+        "WHERE S.QUERYTAG = ? AND S.EXPLAIN_LEVEL = 'P'"
+    )
+    _EXPLAIN_OPERATORS_SQL = (
+        "SELECT O.OPERATOR_ID, O.OPERATOR_TYPE, O.TOTAL_COST, O.IO_COST, "
+        "O.CPU_COST FROM {es}.EXPLAIN_OPERATOR O "
+        "JOIN {es}.EXPLAIN_STATEMENT S ON " + _EXPLAIN_KEYS.format(a="O") + " "
+        "WHERE S.QUERYTAG = ? AND S.EXPLAIN_LEVEL = 'P' ORDER BY O.OPERATOR_ID"
+    )
+    _EXPLAIN_OBJECTS_SQL = (
+        "SELECT DISTINCT B.OBJECT_SCHEMA, B.OBJECT_NAME, B.OBJECT_TYPE "
+        "FROM {es}.EXPLAIN_OBJECT B "
+        "JOIN {es}.EXPLAIN_STATEMENT S ON " + _EXPLAIN_KEYS.format(a="B") + " "
+        "WHERE S.QUERYTAG = ? AND S.EXPLAIN_LEVEL = 'P' "
+        "ORDER BY B.OBJECT_SCHEMA, B.OBJECT_NAME"
+    )
+    # Deleting the EXPLAIN_INSTANCE row cascades to the other explain tables.
+    _EXPLAIN_CLEANUP_SQL = (
+        "DELETE FROM {es}.EXPLAIN_INSTANCE WHERE EXPLAIN_REQUESTER = SESSION_USER "
+        "AND EXPLAIN_TIME IN (SELECT S.EXPLAIN_TIME FROM {es}.EXPLAIN_STATEMENT S "
+        "WHERE S.QUERYTAG = ?)"
+    )
+    _EXPLAIN_SETUP_HINT = (
+        "Create the EXPLAIN tables once with: CALL SYSPROC.SYSINSTALLOBJECTS("
+        "'EXPLAIN', 'C', CAST(NULL AS VARCHAR(128)), CAST(NULL AS VARCHAR(128))) "
+        "and grant the account access (database/migrations/005_dba_tools.sql)."
+    )
+
+    def explain_plan(self, sql: str, timeout_ms: int | None = None) -> ExplainResult:
+        """Run ``EXPLAIN PLAN`` and read the access plan back (never raises).
+
+        Flow: ``EXPLAIN PLAN SET QUERYTAG = '<uuid>' FOR <validated SELECT>``
+        populates the EXPLAIN_* tables; the plan is read back by that tag
+        (statement cost, operators, objects) and the rows are then deleted.
+
+        Graceful fallback (status, not exception): no driver/connection,
+        missing EXPLAIN tables (SQL0219N), missing privilege, or a timeout
+        yield ``UNAVAILABLE`` with an actionable hint; a statement Db2
+        itself rejects yields ``FAILED``.
+        """
+        start = time.perf_counter()
+
+        def result(**fields: Any) -> ExplainResult:
+            return ExplainResult(
+                latency_ms=(time.perf_counter() - start) * 1000, **fields
+            )
+
+        if self._closed:
+            return result(status="UNAVAILABLE", source="none", hint="Db2 adapter closed.")
+        statement = sql.strip()
+        if (
+            not statement
+            or ";" in statement
+            or not statement.upper().startswith(("SELECT", "WITH"))
+        ):
+            return result(
+                status="FAILED",
+                source="none",
+                hint="Only a single validated SELECT can be explained.",
+            )
+
         try:
             conn = self._connect()
+        except AdapterUnavailableError as exc:
+            return result(
+                status="UNAVAILABLE",
+                source="none",
+                sqlstate=(exc.detail or {}).get("sqlstate") if isinstance(exc.detail, dict) else None,
+                hint="Db2 is not reachable or the ibm_db driver is missing; "
+                "EXPLAIN needs a live connection.",
+                detail=exc.message[:300],
+            )
+
+        es = self._settings.explain_schema
+        tag = uuid.uuid4().hex
+        try:
             cursor = conn.cursor()
-            timeout = timeout_ms or self._settings.sql_query_timeout_ms
-            self._apply_timeout(cursor, timeout)
-            cursor.execute(f"EXPLAIN {sql}")
+            self._apply_timeout(
+                cursor, timeout_ms or self._settings.sql_query_timeout_ms
+            )
+            cursor.execute(f"EXPLAIN PLAN SET QUERYTAG = '{tag}' FOR {statement}")
+
+            cursor.execute(self._EXPLAIN_STMT_SQL.format(es=es), (tag,))
+            stmt_rows = cursor.fetchall()
+            if not stmt_rows:
+                conn.rollback()
+                return result(
+                    status="UNAVAILABLE",
+                    source="none",
+                    hint="EXPLAIN ran but the plan could not be read back. "
+                    + self._EXPLAIN_SETUP_HINT,
+                )
+            total_cost = _as_float(stmt_rows[0][0])
+            cursor.execute(self._EXPLAIN_OPERATORS_SQL.format(es=es), (tag,))
+            operators = [
+                ExplainOperator(
+                    operator_id=int(r[0]),
+                    operator_type=str(r[1]).strip(),
+                    total_cost=_as_float(r[2]),
+                    io_cost=_as_float(r[3]),
+                    cpu_cost=_as_float(r[4]),
+                )
+                for r in cursor.fetchall()
+            ]
+            cursor.execute(self._EXPLAIN_OBJECTS_SQL.format(es=es), (tag,))
+            objects = [
+                ExplainObject(
+                    schema_name=str(r[0]).strip(),
+                    name=str(r[1]).strip(),
+                    object_type=_object_kind(r[2]),
+                )
+                for r in cursor.fetchall()
+            ]
+            warnings: list[str] = []
+            try:
+                cursor.execute(self._EXPLAIN_CLEANUP_SQL.format(es=es), (tag,))
+            except Exception as cleanup_exc:  # noqa: BLE001 — cleanup is best-effort
+                warnings.append(
+                    "Plan rows were left in the EXPLAIN tables (cleanup not permitted)."
+                )
+                logger.info("EXPLAIN cleanup skipped: %s", type(cleanup_exc).__name__)
             conn.commit()
-            return True
-        except Exception as exc:  # noqa: BLE001 — advisory by contract
-            info = classify_db_error(exc)
+            return result(
+                status="OK",
+                source="db2",
+                total_cost=total_cost,
+                operators=operators,
+                objects=objects,
+                warnings=warnings,
+            )
+        except Exception as exc:  # noqa: BLE001 — EXPLAIN never raises
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            return self._explain_failure(exc, result)
+        finally:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001 — close is best-effort
+                pass
+
+    def _explain_failure(self, exc: BaseException, result: Any) -> ExplainResult:
+        """Map a driver error during EXPLAIN to UNAVAILABLE vs FAILED."""
+        info = classify_db_error(exc)
+        text = str(exc)
+        detail = sanitize(text, self._settings)[:300]
+        tables_missing = "SQL0219N" in text or "explain table" in text.lower()
+        if tables_missing or info.category in {
+            "authorization",
+            "connectivity",
+            "authentication",
+            "timeout",
+            "resource",
+            "transaction",
+        }:
+            hint = (
+                self._EXPLAIN_SETUP_HINT
+                if tables_missing or info.category == "authorization"
+                else info.hint
+            )
             logger.info(
-                "EXPLAIN dry-run unavailable (SQLSTATE %s, %s): %s — continuing "
-                "without plan check",
+                "EXPLAIN unavailable (SQLSTATE %s, %s) — continuing without a plan",
                 info.sqlstate,
                 info.category,
-                sanitize(str(exc), self._settings)[:200],
             )
-            return False
-        finally:
-            if conn is not None:
-                try:
-                    conn.close()
-                except Exception:  # noqa: BLE001 — close is best-effort
-                    pass
+            return result(
+                status="UNAVAILABLE",
+                source="none",
+                sqlstate=info.sqlstate,
+                hint=hint,
+                detail=detail,
+            )
+        return result(
+            status="FAILED",
+            source="none",
+            sqlstate=info.sqlstate,
+            hint=info.hint,
+            detail=detail,
+        )
+
+    def explain(self, sql: str, timeout_ms: int | None = None) -> bool:
+        """Advisory dry-run used by the execution path: True only for a real plan."""
+        return self.explain_plan(sql, timeout_ms).status == "OK"
+
+    # -- execution history (APP.QUERY_EXECUTIONS) ---------------------------
 
     _INSERT_EXECUTION_SQL = (
         "INSERT INTO {schema}.QUERY_EXECUTIONS ("

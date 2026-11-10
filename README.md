@@ -41,6 +41,8 @@ built frontend automatically when `frontend/dist` exists (`npm run build`).
 | `POST /api/v1/chat` | Copilot flow (RAG / text-to-SQL, auto-routed) |
 | `POST /api/v1/sql/validate` | The SQL safety gate, exposed for the UI |
 | `POST /api/v1/sql/execute` | Validated, row-capped, timed, audited read-only execution |
+| `POST /api/v1/sql/explain` | EXPLAIN a validated SELECT (real Db2 plan or labelled mock; graceful fallback) |
+| `GET /api/v1/dba/tools` · `POST /api/v1/dba/tools/{id}/run` | Fixed SYSCAT catalog + `MON_GET_*` monitoring tools — [`docs/DBA_TOOLS.md`](docs/DBA_TOOLS.md) |
 | `GET /api/v1/ready` | Readiness gate (503 when any probe is not ok) |
 | `GET /api/v1/audit` | Recent audit entries |
 
@@ -78,7 +80,7 @@ Copy `.env.example` to `.env` and fill in locally — **never commit `.env`**
 ## Testing
 
 ```bash
-.venv\Scripts\python -m pytest backend/tests -q   # 160 offline tests
+.venv\Scripts\python -m pytest backend/tests -q   # 327 offline tests
 cd frontend && npm run build                      # strict TS + production bundle
 ```
 

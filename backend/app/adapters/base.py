@@ -76,6 +76,62 @@ class SchemaSnapshot:
 
 
 @dataclass(slots=True)
+class ExplainOperator:
+    """One row of EXPLAIN_OPERATOR (or its mock equivalent)."""
+
+    operator_id: int
+    operator_type: str  # TBSCAN, IXSCAN, FETCH, SORT, HSJOIN, RETURN, ...
+    total_cost: float | None = None
+    io_cost: float | None = None
+    cpu_cost: float | None = None
+
+
+@dataclass(slots=True)
+class ExplainObject:
+    """A table/index touched by the plan (EXPLAIN_OBJECT)."""
+
+    schema_name: str
+    name: str
+    object_type: str  # TABLE | INDEX
+
+
+@dataclass(slots=True)
+class ExplainResult:
+    """Outcome of an EXPLAIN attempt. Never raises: failures are statuses.
+
+    ``status``:
+    - ``OK``          a plan was produced (``source`` says by whom)
+    - ``UNAVAILABLE`` Db2 cannot explain here (no connection, driver, EXPLAIN
+                      tables or privilege) — ``hint`` says how to fix it
+    - ``FAILED``      Db2 rejected the statement itself
+    """
+
+    status: str
+    source: str  # "db2" | "mock" | "none"
+    total_cost: float | None = None
+    operators: list[ExplainOperator] = field(default_factory=list)
+    objects: list[ExplainObject] = field(default_factory=list)
+    sqlstate: str | None = None
+    hint: str | None = None
+    detail: str | None = None
+    warnings: list[str] = field(default_factory=list)
+    latency_ms: float = 0.0
+
+
+@dataclass(slots=True)
+class DbaToolResult:
+    """Rows returned by one DBA tool (catalog or monitoring)."""
+
+    tool_id: str
+    source: str  # "db2" | "mock"
+    columns: list[str]
+    rows: list[list[Any]]
+    truncated: bool = False
+    latency_ms: float = 0.0
+    notes: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class DocumentInput:
     text: str
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -184,6 +240,12 @@ class DatabaseAdapter(Protocol):
         Returns True when the server accepted the plan, False otherwise.
         NEVER raises: the dry-run is advisory (accounts often lack EXPLAIN
         privileges / plan tables) and must not block execution.
+        """
+
+    def explain_plan(self, sql: str, timeout_ms: int | None = None) -> ExplainResult:
+        """EXPLAIN an already-validated SELECT and return the access plan.
+
+        NEVER raises — see :class:`ExplainResult` for the status contract.
         """
 
     def fetch_schema(self) -> SchemaSnapshot: ...

@@ -27,8 +27,6 @@ from __future__ import annotations
 import json
 import logging
 import time
-from datetime import date, datetime, time as dt_time
-from decimal import Decimal
 from typing import Any
 
 from app.adapters.base import AuditRecord, ExecutionRecord
@@ -36,6 +34,7 @@ from app.adapters.registry import AdapterRegistry
 from app.core.clock import utc_now_iso
 from app.core.config import Settings
 from app.core.errors import AppError, SqlRejectedError, UpstreamTimeoutError
+from app.core.serialize import json_safe
 from app.schemas.sql import SqlExecutionResponse, SqlValidateResponse
 from app.security.sanitize import sanitize_metadata
 from app.services.sql_guard_service import SqlGuardService
@@ -45,17 +44,7 @@ logger = logging.getLogger(__name__)
 _SQL_SNIPPET_MAX = 2000  # matches app.security.sanitize.MAX_LEN budget
 
 
-def _json_safe(value: Any) -> Any:
-    """Coerce driver values (Decimal/datetime/bytes/...) into JSON types."""
-    if value is None or isinstance(value, (bool, int, float, str)):
-        return value
-    if isinstance(value, Decimal):
-        return float(value)
-    if isinstance(value, (datetime, date, dt_time)):
-        return value.isoformat()
-    if isinstance(value, (bytes, bytearray, memoryview)):
-        return bytes(value).hex()
-    return str(value)
+_json_safe = json_safe  # kept for backwards-compatible imports
 
 
 class SqlExecutionService:

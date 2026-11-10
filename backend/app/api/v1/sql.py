@@ -16,7 +16,8 @@ import uuid
 
 from fastapi import APIRouter, Request
 
-from app.api.deps import build_sql_execution, build_sql_guard
+from app.api.deps import build_explain_service, build_sql_execution, build_sql_guard
+from app.schemas.dba import ExplainRequest, ExplainResponse
 from app.schemas.sql import (
     SqlExecutionRequest,
     SqlExecutionResponse,
@@ -33,6 +34,20 @@ def post_sql_validate(
 ) -> SqlValidateResponse:
     guard = build_sql_guard(request)
     return guard.validate(payload.sql)
+
+
+@router.post("/sql/explain", response_model=ExplainResponse)
+def post_sql_explain(payload: ExplainRequest, request: Request) -> ExplainResponse:
+    """EXPLAIN a validated SELECT without executing it.
+
+    HTTP 200 carries ``status`` OK / UNAVAILABLE / FAILED (graceful fallback
+    when Db2, its EXPLAIN tables or the privilege are missing); SQL that fails
+    the safety gate is a 422 ``SQL_REJECTED``.
+    """
+    request_id = getattr(request.state, "request_id", uuid.uuid4().hex[:16])
+    return build_explain_service(request).explain(
+        payload.sql, request_id=request_id, session_id=payload.session_id
+    )
 
 
 @router.post("/sql/execute", response_model=SqlExecutionResponse)

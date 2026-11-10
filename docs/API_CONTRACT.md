@@ -108,7 +108,53 @@ Key violation codes: `parse_error`, `multiple_statements`,
                  "latency_ms", "detail", "request_id" } ],
   "total": 3, "mock": true }
 ```
-`status` values: `OK`, `BLOCKED`, `ERROR`, `REJECTED_BY_GATE`.
+`status` values: `OK`, `BLOCKED`, `ERROR`, `TIMEOUT`, `REJECTED`, `REJECTED_BY_GATE`,
+`UNAVAILABLE`, `FAILED`. Each entry also carries `operation`
+(`chat` · `sql_execute` · `sql_explain` · `dba_tool`).
+
+## POST /api/v1/sql/execute
+
+Body `{ "sql": "...", "session_id": null }`. Validates (fail-closed), applies the hard
+row cap, runs the best-effort EXPLAIN dry-run, executes read-only under the policy timeout,
+records history + audit. Rejected SQL → 422 `SQL_REJECTED`.
+
+## POST /api/v1/sql/explain
+
+Body `{ "sql": "...", "session_id": null }`. Validates the SQL through the same gate, then
+returns the access plan **without executing** the statement.
+
+```json
+{ "request_id": "...", "mock": false, "status": "OK|UNAVAILABLE|FAILED",
+  "source": "db2|mock|none", "explained_sql": "...", "total_cost": 25.5,
+  "operators": [ { "operator_id", "operator_type", "total_cost", "io_cost", "cpu_cost" } ],
+  "objects":   [ { "schema_name", "name", "object_type" } ],
+  "summary": ["..."], "sqlstate": null, "hint": null, "detail": null,
+  "warnings": [], "latency_ms": 12 }
+```
+`UNAVAILABLE` / `FAILED` are **HTTP 200** (graceful fallback, with `hint`); only SQL rejected by
+the gate is an error (422 `SQL_REJECTED`). `source="mock"` plans are synthetic.
+
+## GET /api/v1/dba/tools · POST /api/v1/dba/tools/{tool_id}/run
+
+Fixed catalog (`catalog.*`, SYSCAT) and monitoring (`monitor.*`, MON_GET_*) tools — see
+[`DBA_TOOLS.md`](DBA_TOOLS.md). Run body: `{ "params": { "schema"?, "table"?, "limit"? },
+"session_id"? }`; response `{ request_id, tool_id, kind, title, mock, source: "db2|mock",
+params, columns, rows, row_count, truncated, latency_ms, notes }`.
+
+## Database error mapping (SQLSTATE → HTTP)
+
+| SQLSTATE / category | HTTP | `error.code` |
+|---|---|---|
+| `57014` timeout | 504 | `UPSTREAM_TIMEOUT` |
+| `42501`, class `425` (authorization) | 403 | `DB_PERMISSION_DENIED` |
+| class `427` (undefined object) | 404 | `DB_OBJECT_NOT_FOUND` |
+| class `426`, `428`, `42703` (syntax/semantics) | 422 | `DB_SQL_ERROR` |
+| class `08`, `28`, `570/571`, `911` (connect/auth/resource) | 503 | `ADAPTER_UNAVAILABLE` |
+| anything else | 502 | `DB_ERROR` |
+| invalid tool parameters | 422 | `INVALID_TOOL_PARAMS` |
+| unknown tool | 404 | `NOT_FOUND` |
+
+`error.detail` carries `sqlstate`, `category` and a curated `hint` — never credentials.
 
 ## Other routes
 

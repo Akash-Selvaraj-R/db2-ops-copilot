@@ -79,6 +79,35 @@ class UpstreamTimeoutError(AppError):
     status_code = 504
 
 
+# -- Db2 error taxonomy (SQLSTATE -> HTTP), see Db2DatabaseAdapter ----------
+class DbPermissionError(AppError):
+    """The Db2 account lacks a privilege (SQLSTATE 42501 / class 425)."""
+
+    code = "DB_PERMISSION_DENIED"
+    status_code = 403
+
+
+class DbObjectNotFoundError(AppError):
+    """A referenced table/column/function does not exist (SQLSTATE class 427)."""
+
+    code = "DB_OBJECT_NOT_FOUND"
+    status_code = 404
+
+
+class DbSqlError(AppError):
+    """The statement is syntactically/semantically invalid (class 426/428)."""
+
+    code = "DB_SQL_ERROR"
+    status_code = 422
+
+
+class DbError(AppError):
+    """Unclassified database failure (bad gateway)."""
+
+    code = "DB_ERROR"
+    status_code = 502
+
+
 def error_payload(
     code: str, message: str, request_id: str, detail: Any = None
 ) -> dict[str, Any]:

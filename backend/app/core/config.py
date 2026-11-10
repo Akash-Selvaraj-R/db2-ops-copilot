@@ -9,6 +9,7 @@ Design rules (M1):
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from typing import Literal
 
@@ -67,6 +68,14 @@ class Settings(BaseSettings):
     # Schema that owns the application tables (APP_AUDIT, DEMO_*, COPILOT_KB).
     # Introspection reads SYSCAT for THIS schema — not the login user's schema.
     db2_app_schema: str = Field(default="APP", validation_alias="DB2_APP_SCHEMA")
+    # Schema holding the EXPLAIN_* tables (SYSTOOLS when created with
+    # SYSPROC.SYSINSTALLOBJECTS('EXPLAIN','C',NULL,NULL)). Interpolated into
+    # fixed SQL templates, so it is validated as a plain identifier.
+    db2_explain_schema: str = Field(
+        default="SYSTOOLS", validation_alias="DB2_EXPLAIN_SCHEMA"
+    )
+    # Default / maximum rows returned by the DBA monitoring tools.
+    dba_default_limit: int = Field(default=20, ge=1, le=100)
 
     # --- Ollama models -----------------------------------------------------
     ollama_base_url: str = Field(
@@ -128,6 +137,14 @@ class Settings(BaseSettings):
             return ",".join(str(v) for v in value)
         return value
 
+    @field_validator("db2_app_schema", "db2_explain_schema")
+    @classmethod
+    def _plain_identifier(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$#@]{0,127}", cleaned):
+            raise ValueError("must be a plain SQL identifier")
+        return cleaned
+
     @field_validator("log_level")
     @classmethod
     def _upper_log_level(cls, value: str) -> str:
@@ -150,6 +167,10 @@ class Settings(BaseSettings):
         """Uppercased application schema name (Db2 stores unquoted identifiers
         upper-cased; SYSCAT comparisons are case-sensitive)."""
         return self.db2_app_schema.strip().upper() or "APP"
+
+    @property
+    def explain_schema(self) -> str:
+        return self.db2_explain_schema.strip().upper() or "SYSTOOLS"
 
     @property
     def qualified_app_table(self) -> str:

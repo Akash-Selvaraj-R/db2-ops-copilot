@@ -20,7 +20,11 @@ from app.adapters.audit.db2_audit import Db2AuditAdapter
 from app.adapters.base import AuditRecord, ExecutionRecord
 from app.adapters.db.db2_db import Db2DatabaseAdapter, classify_db_error
 from app.core.config import Settings
-from app.core.errors import AdapterUnavailableError, UpstreamTimeoutError
+from app.core.errors import (
+    AdapterUnavailableError,
+    DbObjectNotFoundError,
+    UpstreamTimeoutError,
+)
 
 # Generated per run: a throwaway value, never a committed credential.
 PASSWORD = "pw-" + uuid.uuid4().hex
@@ -171,8 +175,9 @@ def test_query_timeout_maps_to_upstream_timeout(fake_dbi, settings):
 
 def test_query_error_is_classified_and_connection_closed(fake_dbi, settings):
     fake_dbi.script = [("SELECT", Exception("SQL0204N undefined SQLSTATE=42704"))]
-    with pytest.raises(AdapterUnavailableError) as excinfo:
+    with pytest.raises(DbObjectNotFoundError) as excinfo:
         Db2DatabaseAdapter(settings).execute_readonly("SELECT 1 FROM NOPE")
+    assert excinfo.value.status_code == 404
     assert excinfo.value.detail["sqlstate"] == "42704"
     assert fake_dbi.connections[0].closed is True
 
