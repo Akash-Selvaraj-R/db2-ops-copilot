@@ -1,9 +1,18 @@
-"""REAL Ollama chat-model adapter (Ollama REST API, ``/api/chat``).
+"""REAL Ollama chat-model adapter (M2 — Ollama REST API, ``/api/chat``).
 
-Status (M1): implemented against the documented Ollama HTTP API but NEVER
-called during M1 (no Ollama installation per the development constraint).
-``ping()`` and ``generate()`` degrade cleanly with actionable errors when the
-server is absent.
+Production behavior:
+- one reused ``httpx.Client`` via :class:`OllamaHttpClient` (keep-alive),
+- bounded retry with backoff for transient failures only (M2.3),
+- request timeout from ``OLLAMA_TIMEOUT_MS``,
+- response normalization into :class:`ModelResult` (text + token usage),
+- structured logging of *metadata only* — model, endpoint, token counts,
+  latency. Prompt and completion CONTENT is never logged,
+- all failures raise ``AdapterUnavailableError`` / ``UpstreamTimeoutError``
+  with actionable messages; never a silent mock fallback.
+
+NEVER executed against a real Ollama server on the development machine
+(no Ollama installation per the project constraint). Offline unit tests
+exercise it with a mocked HTTP transport (backend/tests/test_ollama_unit.py).
 """
 
 from __future__ import annotations
@@ -11,11 +20,10 @@ from __future__ import annotations
 import logging
 import time
 
-import httpx
-
 from app.adapters.base import ModelResult, ProbeResult
+from app.adapters.ollama_http import OllamaHttpClient
 from app.core.config import Settings
-from app.core.errors import AdapterUnavailableError, UpstreamTimeoutError
+from app.core.errors import AdapterUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -30,35 +38,33 @@ class OllamaChatAdapter:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._closed = False
+        self._http = OllamaHttpClient(settings, "chat")
 
     @property
     def base_url(self) -> str:
-        return self._settings.ollama_base_url.rstrip("/")
+        return self._http.base_url
 
     @property
     def model_name(self) -> str:
         return self._settings.ollama_llm_model
 
     # -- probes -----------------------------------------------------------
-    def _list_models(self) -> tuple[set[str], str | None]:
+    def list_models(self) -> tuple[set[str], str | None]:
         """Return the set of local model names, or an error string."""
         try:
-            response = httpx.get(f"{self.base_url}/api/tags", timeout=2.0)
-            response.raise_for_status()
-            payload = response.json()
-            names = {
-                model.get("name", "")
-                for model in payload.get("models", [])
-                if isinstance(model, dict)
-            }
-            return names, None
-        except httpx.HTTPError as exc:
+            body = self._http.request_json("GET", "/api/tags")
+        except AdapterUnavailableError as exc:
+            return set(), exc.message
+        except Exception as exc:  # noqa: BLE001 — probe must never raise
             return set(), f"{type(exc).__name__}: {exc}"
-        except ValueError as exc:
-            return set(), f"invalid response: {exc}"
+        names = {
+            model.get("name", "")
+            for model in body.get("models", [])
+            if isinstance(model, dict)
+        }
+        return names, None
 
     def ping(self) -> ProbeResult:
-        start = time.perf_counter()
         if self._closed:
             return ProbeResult(
                 name=self.probe_name,
@@ -67,9 +73,12 @@ class OllamaChatAdapter:
                 latency_ms=0.0,
                 detail="Ollama adapter closed",
             )
-        elapsed = lambda: (time.perf_counter() - start) * 1000  # noqa: E731
+        start = time.perf_counter()
 
-        names, error = self._list_models()
+        def elapsed() -> float:
+            return (time.perf_counter() - start) * 1000
+
+        names, error = self.list_models()
         if error is not None:
             return ProbeResult(
                 name=self.probe_name,
@@ -78,7 +87,8 @@ class OllamaChatAdapter:
                 latency_ms=elapsed(),
                 detail=(
                     f"Ollama not reachable at {self.base_url} ({error}). "
-                    "Install Ollama and start the service — see DEPLOYMENT.md."
+                    "Install Ollama and start the service — see "
+                    "docs/OLLAMA_INTEGRATION.md."
                 ),
             )
         wanted = self.model_name
@@ -92,7 +102,7 @@ class OllamaChatAdapter:
                 latency_ms=elapsed(),
                 detail=(
                     f"Ollama is running but model '{wanted}' is not pulled "
-                    "(run: ollama pull granite4.2:3b)."
+                    f"(run: ollama pull {wanted})."
                 ),
             )
         return ProbeResult(
@@ -129,41 +139,38 @@ class OllamaChatAdapter:
             },
         }
         start = time.perf_counter()
-        try:
-            response = httpx.post(
-                f"{self.base_url}/api/chat",
-                json=payload,
-                timeout=self._settings.ollama_timeout_ms / 1000,
-            )
-            response.raise_for_status()
-            body = response.json()
-        except httpx.TimeoutException as exc:
-            raise UpstreamTimeoutError(
-                f"Ollama generation timed out after "
-                f"{self._settings.ollama_timeout_ms} ms."
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise AdapterUnavailableError(
-                f"Ollama request to {self.base_url} failed: "
-                f"{type(exc).__name__}: {exc}"
-            ) from exc
-        except ValueError as exc:
-            raise AdapterUnavailableError(
-                f"Ollama returned a non-JSON response: {exc}"
-            ) from exc
+        body = self._http.request_json("POST", "/api/chat", json_body=payload)
+        latency_ms = (time.perf_counter() - start) * 1000
 
-        content = (body.get("message") or {}).get("content", "")
-        usage = {}
+        message = body.get("message")
+        if not isinstance(message, dict):
+            raise AdapterUnavailableError(
+                "Ollama /api/chat response is missing the 'message' object."
+            )
+        content = str(message.get("content", ""))
+
+        usage: dict[str, int] = {}
         if "prompt_eval_count" in body:
             usage["prompt_tokens"] = int(body["prompt_eval_count"])
         if "eval_count" in body:
             usage["completion_tokens"] = int(body["eval_count"])
+
+        # Metadata only — never prompt/completion content.
+        logger.info(
+            "ollama chat ok model=%s prompt_tokens=%s completion_tokens=%s "
+            "latency_ms=%.0f",
+            self.model_name,
+            usage.get("prompt_tokens", "-"),
+            usage.get("completion_tokens", "-"),
+            latency_ms,
+        )
         return ModelResult(
             text=content,
             model=self.model_name,
-            latency_ms=(time.perf_counter() - start) * 1000,
+            latency_ms=latency_ms,
             usage=usage or None,
         )
 
     def close(self) -> None:
         self._closed = True
+        self._http.close()

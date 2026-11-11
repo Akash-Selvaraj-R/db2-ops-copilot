@@ -2,12 +2,15 @@
 
 Stands in for the real ``DB2VS`` (langchain-db2) vector store during offline
 development and tests.
+
+Score semantics MATCH the real adapter: ``score`` is a DISTANCE
+(``1 - token_overlap_ratio``) — **lower is closer**, exactly like Db2's
+VECTOR_DISTANCE returned by DB2VS. Results are sorted ascending.
 """
 
 from __future__ import annotations
 
 import re
-import time
 
 from app.adapters.base import DocumentInput, ProbeResult, VectorHit
 from app.core.config import Settings
@@ -22,6 +25,7 @@ _SEED_DOCUMENTS: list[DocumentInput] = [
             "vector store lives inside Db2 rather than a side-car database."
         ),
         metadata={
+            "id": "seed-vector-db2vs",
             "source": "langchain-docs",
             "title": "Db2 vector store (DB2VS)",
             "topic": "rag",
@@ -33,6 +37,7 @@ _SEED_DOCUMENTS: list[DocumentInput] = [
             "introspect table and column metadata for schema-aware SQL generation."
         ),
         metadata={
+            "id": "seed-syscat-introspection",
             "source": "db2-docs",
             "title": "Catalog view introspection",
             "topic": "catalog",
@@ -44,6 +49,7 @@ _SEED_DOCUMENTS: list[DocumentInput] = [
             "query and is the standard way to enforce result-set row limits."
         ),
         metadata={
+            "id": "seed-fetch-first",
             "source": "db2-docs",
             "title": "Row limits with FETCH FIRST",
             "topic": "sql",
@@ -56,6 +62,7 @@ _SEED_DOCUMENTS: list[DocumentInput] = [
             "before any execution."
         ),
         metadata={
+            "id": "seed-sqlglot-db2",
             "source": "ibm-github",
             "title": "IBM SQLGlot Db2 dialect",
             "topic": "validation",
@@ -67,6 +74,7 @@ _SEED_DOCUMENTS: list[DocumentInput] = [
             "question, generated SQL, status and latency for enterprise traceability."
         ),
         metadata={
+            "id": "seed-audit-design",
             "source": "internal-design",
             "title": "Audit logging design",
             "topic": "audit",
@@ -80,7 +88,7 @@ def _tokens(text: str) -> set[str]:
 
 
 class MockVectorStoreAdapter:
-    """In-memory vector store with deterministic scoring."""
+    """In-memory vector store with deterministic scoring (distance-based)."""
 
     probe_name = "vector_store"
     provider_id = "mock"
@@ -119,16 +127,39 @@ class MockVectorStoreAdapter:
                     continue
             doc_tokens = _tokens(doc.text)
             union = query_tokens | doc_tokens
-            score = len(query_tokens & doc_tokens) / len(union) if union else 0.0
+            overlap = len(query_tokens & doc_tokens) / len(union) if union else 0.0
+            # Distance semantics (lower = closer), matching VECTOR_DISTANCE.
+            distance = round(1.0 - overlap, 4)
             hits.append(
-                VectorHit(content=doc.text, score=round(score, 4), metadata=dict(doc.metadata))
+                VectorHit(
+                    content=doc.text, score=distance, metadata=dict(doc.metadata)
+                )
             )
-        hits.sort(key=lambda h: h.score, reverse=True)
+        hits.sort(key=lambda h: h.score)  # ascending: closest first
         return hits[: max(k, 0)]
 
     def upsert_documents(self, documents: list[DocumentInput]) -> int:
-        self._documents.extend(documents)
-        return len(documents)
+        """Insert documents; ones with a known metadata ``id`` replace prior
+        rows for that id (mirrors DB2VS delete-then-add upsert semantics)."""
+        added = 0
+        for doc in documents:
+            doc_id = doc.metadata.get("id")
+            if doc_id is not None:
+                self._documents = [
+                    d for d in self._documents if d.metadata.get("id") != doc_id
+                ]
+            self._documents.append(doc)
+            added += 1
+        return added
+
+    def delete(self, ids: list[str]) -> int:
+        """Delete by metadata id (the mock's stand-in for hashed PKs)."""
+        wanted = set(ids)
+        before = len(self._documents)
+        self._documents = [
+            d for d in self._documents if d.metadata.get("id") not in wanted
+        ]
+        return before - len(self._documents)
 
     def count(self) -> int:
         return len(self._documents)

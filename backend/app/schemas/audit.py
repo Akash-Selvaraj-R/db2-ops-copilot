@@ -10,6 +10,7 @@ from app.schemas.common import StrictModel
 class AuditEntryModel(StrictModel):
     id: int
     timestamp: str
+    operation: str = "chat"  # chat | sql_execute | sql_validate | ...
     intent: str
     question: str
     status: str

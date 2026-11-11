@@ -6,6 +6,7 @@ import threading
 from collections import deque
 
 from app.adapters.base import AuditRecord, ProbeResult
+from app.core.clock import utc_now_iso
 from app.core.config import Settings
 
 _SEED_ENTRIES = [
@@ -79,6 +80,8 @@ class MockAuditAdapter:
         with self._lock:
             entry.id = self._next_id
             self._next_id += 1
+            if not entry.timestamp:  # Db2 assigns REQ_TS server-side; mirror that
+                entry.timestamp = utc_now_iso()
             self._entries.append(entry)
             return entry.id
 
@@ -96,10 +99,14 @@ def _replace_copy(record: AuditRecord) -> AuditRecord:
     return AuditRecord(
         id=record.id,
         timestamp=record.timestamp,
+        operation=record.operation,
+        session_id=record.session_id,
         intent=record.intent,
         question=record.question,
+        sql_text=record.sql_text,
         status=record.status,
         latency_ms=record.latency_ms,
         detail=record.detail,
         request_id=record.request_id,
+        metadata=record.metadata,
     )

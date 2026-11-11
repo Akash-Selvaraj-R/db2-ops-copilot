@@ -3,6 +3,7 @@ import { NavLink } from "react-router-dom";
 const NAV_ITEMS = [
   { to: "/", label: "Dashboard", icon: "▦" },
   { to: "/chat", label: "Chat workspace", icon: "💬" },
+  { to: "/approvals", label: "Approvals", icon: "✓" },
   { to: "/config", label: "Configuration", icon: "⚙" },
 ] as const;
 

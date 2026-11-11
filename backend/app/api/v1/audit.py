@@ -25,6 +25,7 @@ def get_audit(
             AuditEntryModel(
                 id=e.id,
                 timestamp=e.timestamp,
+                operation=e.operation or "chat",
                 intent=e.intent,
                 question=e.question,
                 status=e.status,

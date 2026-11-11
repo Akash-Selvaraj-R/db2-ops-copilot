@@ -124,6 +124,7 @@ export interface ConfigResponse {
 export interface AuditEntry {
   id: number;
   timestamp: string;
+  operation: string;
   intent: string;
   question: string;
   status: string;
@@ -135,6 +136,69 @@ export interface AuditEntry {
 export interface AuditResponse {
   entries: AuditEntry[];
   total: number;
+  mock: boolean;
+}
+
+export type ApprovalExecutionMode =
+  | "mock_simulated"
+  | "disabled"
+  | "admin_not_configured"
+  | "enabled_unverified";
+
+export interface ApprovalExecution {
+  status: string;
+  simulated: boolean;
+  detail: string;
+  reason?: string | null;
+  code?: string | null;
+  latency_ms?: number | null;
+  executed_at?: string | null;
+}
+
+export interface Approval {
+  id: string;
+  status: string;
+  action_type: string;
+  params: Record<string, string>;
+  statement: string;
+  title: string;
+  rationale: string;
+  risk: string;
+  created_at: string;
+  expires_at: string;
+  request_id: string | null;
+  session_id: string | null;
+  decided_by: string | null;
+  decided_at: string | null;
+  decision_reason: string | null;
+  execution: ApprovalExecution | null;
+}
+
+export interface ApprovalListResponse {
+  approvals: Approval[];
+  total: number;
+  mock: boolean;
+  execution_mode: ApprovalExecutionMode;
+}
+
+export interface AgentProposalRequest {
+  actions: {
+    action_type: "runstats" | "create_index";
+    params: Record<string, string>;
+    rationale: string;
+  }[];
+  session_id?: string | null;
+}
+
+export interface AgentProposalResponse {
+  approvals: Approval[];
+  tool_calls: number;
+  max_tool_calls: number;
+  mock: boolean;
+}
+
+export interface ApprovalDecisionResponse {
+  approval: Approval;
   mock: boolean;
 }
 

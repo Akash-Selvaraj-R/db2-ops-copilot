@@ -26,6 +26,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.adapters.registry import AdapterRegistry
+from app.agent.approvals import ApprovalStore
 from app.api.v1.router import api_router
 from app.core.config import get_settings
 from app.core.errors import error_payload, register_exception_handlers
@@ -117,6 +118,7 @@ def create_app() -> FastAPI:
         docs_url="/docs",
         openapi_url="/openapi.json",
     )
+    app.state.approval_store = ApprovalStore()
 
     # Order matters: CORS first, then request context, then handlers/routes.
     app.add_middleware(

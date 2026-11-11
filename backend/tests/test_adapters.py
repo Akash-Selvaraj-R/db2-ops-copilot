@@ -50,7 +50,15 @@ def test_mock_db_schema_snapshot():
     snapshot = db.fetch_schema()
     assert snapshot.source == "mock"
     names = {t.name for t in snapshot.tables}
-    assert {"DEMO_SERVERS", "DEMO_INCIDENTS", "KB_CHUNKS", "APP_AUDIT"} <= names
+    # Mirrors database/migrations 001 + 004 (M2 schema).
+    assert {
+        "DEMO_SERVERS",
+        "DEMO_INCIDENTS",
+        "COPILOT_KB",
+        "APP_AUDIT",
+        "DOCUMENT_METADATA",
+        "QUERY_EXECUTIONS",
+    } <= names
 
 
 # -- mock vector store -----------------------------------------------------------
@@ -58,7 +66,8 @@ def test_mock_vector_search_ranks_by_overlap():
     store = MockVectorStoreAdapter(Settings(_env_file=None))
     hits = store.similarity_search("vector embeddings in Db2", k=2)
     assert hits
-    assert hits[0].score >= hits[-1].score
+    # Score is a DISTANCE (lower = closer), matching DB2VS/VECTOR_DISTANCE.
+    assert hits[0].score <= hits[-1].score
     assert "vector" in hits[0].content.lower()
 
 

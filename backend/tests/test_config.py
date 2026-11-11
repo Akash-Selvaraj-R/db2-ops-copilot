@@ -75,3 +75,53 @@ def test_missing_env_vars_fall_back_to_safe_defaults(monkeypatch):
     assert settings.adapter_mode == "mock"
     # Mock mode is the safe default: no real connections attempted.
     assert settings.is_mock is True
+
+
+# -----------------------------------------------------------------------------------
+# P0 configuration bounds (agent/approval settings)
+# -----------------------------------------------------------------------------------
+def test_agent_max_tool_calls_bounds():
+    # below the minimum
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, agent_max_tool_calls=0)
+    # above the maximum
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, agent_max_tool_calls=17)
+    # both inclusive bounds are accepted
+    assert Settings(_env_file=None, agent_max_tool_calls=1).agent_max_tool_calls == 1
+    assert Settings(_env_file=None, agent_max_tool_calls=16).agent_max_tool_calls == 16
+
+
+def test_approval_ttl_seconds_bounds():
+    # below the minimum
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, approval_ttl_seconds=0)
+    # above the maximum (24h + 1)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, approval_ttl_seconds=86401)
+    # both inclusive bounds are accepted
+    assert Settings(_env_file=None, approval_ttl_seconds=1).approval_ttl_seconds == 1
+    assert Settings(_env_file=None, approval_ttl_seconds=86400).approval_ttl_seconds == 86400
+
+
+def test_agent_actions_enabled_defaults_to_false(monkeypatch):
+    monkeypatch.delenv("AGENT_ACTIONS_ENABLED", raising=False)
+    settings = Settings(_env_file=None)
+    # Privileged execution must be opt-in: never on by default.
+    assert settings.agent_actions_enabled is False
+
+
+def test_admin_credentials_are_not_exposed_by_serialization():
+    admin_pw = "admin-serial-" + "value-not-for-logs"
+    settings = Settings(
+        _env_file=None,
+        db2_admin_user="db2_admin",
+        db2_admin_password=admin_pw,
+    )
+
+    assert admin_pw not in settings.model_dump_json()
+    assert admin_pw not in str(settings.model_dump(mode="json"))
+    assert admin_pw not in str(settings.model_dump())
+    # ro password stays protected too
+    ro = Settings(_env_file=None, db2_ro_password="ro-serial-value")
+    assert "ro-serial-value" not in ro.model_dump_json()

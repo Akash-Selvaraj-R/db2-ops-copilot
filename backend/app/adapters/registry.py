@@ -50,9 +50,11 @@ class AdapterRegistry:
             self.orchestrator = MockOrchestrator(settings, validator=self.validator)
         else:
             self.database = Db2DatabaseAdapter(settings)
-            self.vector_store = Db2VectorStoreAdapter(settings)
-            self.chat_model = OllamaChatAdapter(settings)
             self.embeddings = OllamaEmbeddingsAdapter(settings)
+            self.vector_store = Db2VectorStoreAdapter(
+                settings, embeddings=self.embeddings
+            )
+            self.chat_model = OllamaChatAdapter(settings)
             self.audit = Db2AuditAdapter(settings)
             self.orchestrator = LangChainOrchestrator(
                 settings,
