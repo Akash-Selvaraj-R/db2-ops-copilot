@@ -11,6 +11,7 @@ from fastapi import Request
 
 from app.adapters.registry import AdapterRegistry
 from app.core.config import Settings, get_settings
+from app.services.approval_service import ApprovalService
 from app.services.chat_service import ChatService
 from app.services.dba_service import DbaService
 from app.services.explain_service import ExplainService
@@ -30,6 +31,12 @@ def get_registry(request: Request) -> AdapterRegistry:
 
 def get_started_at(request: Request) -> float:
     return request.app.state.started_at
+
+
+def build_approval_service(request: Request) -> ApprovalService:
+    return ApprovalService(
+        get_settings(), get_registry(request), request.app.state.approval_store
+    )
 
 
 def build_health_service(request: Request) -> HealthService:

@@ -507,6 +507,77 @@ body {
   background: var(--surface);
 }
 
+/* ---- approval workflow ---- */
+.approval-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  align-items: end;
+}
+
+.approval-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-weight: 600;
+}
+
+.approval-form-wide {
+  grid-column: span 2;
+}
+
+.approval-input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 9px;
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+}
+
+.notice,
+.success-banner {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+  background: #e8edf4;
+  color: var(--text);
+}
+
+.success-banner {
+  border-color: #b7dfc5;
+  background: #e2f4e9;
+  color: var(--ok);
+}
+
+.approval-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.approval-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+}
+
+.approval-card h3 {
+  margin: 0 0 3px;
+  font-size: 15px;
+}
+
+.approval-card p {
+  margin: 8px 0;
+}
+
+.approval-card .msg-sql {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* ---- tables ---- */
 .table {
   width: 100%;
@@ -588,5 +659,9 @@ body {
   .kv-row {
     grid-template-columns: 1fr;
     gap: 0;
+  }
+
+  .approval-form-wide {
+    grid-column: auto;
   }
 }

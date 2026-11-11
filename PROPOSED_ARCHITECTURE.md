@@ -1,6 +1,11 @@
 # PROPOSED ARCHITECTURE — "Db2 Ops Copilot" (Concept 5)
 
-**Status:** M0 proposal — **not implemented**. All components are design intent; nothing in this file exists as code yet.
+**Status:** M0 proposal — historical design document. It was never code at
+the time of writing; since then the project has been implemented in staged
+form (see `README.md` for current status). Where this document and the
+implemented system differ, the implementation + `docs/ARCHITECTURE.md` are
+authoritative. All components here remain design intent unless listed as
+implemented there.
 **Stack:** See `TECH_STACK_DECISION.md`. Python 3.14 · LangChain 1.x · `langchain-db2` (DB2VS) · `ibm_db` · Ollama (`granite4.2:3b`, `nomic-embed-text:v1.5`) · IBM Db2 Community Edition (Docker).
 
 ---

@@ -18,7 +18,7 @@ container):
 - Source: `langchain-ai/langchain-ibm` repo, `libs/langchain-db2/langchain_db2/db2vs.py`
 - Worked example: `libs/langchain-db2/docs/db2.ipynb`
 
-Verified facts (full table in `docs/VECTOR_STORE.md`):
+Verified facts (full table inline):
 
 | Fact | Value |
 |---|---|

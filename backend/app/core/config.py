@@ -77,6 +77,25 @@ class Settings(BaseSettings):
     # Default / maximum rows returned by the DBA monitoring tools.
     dba_default_limit: int = Field(default=20, ge=1, le=100)
 
+    # --- Agent (M3) --------------------------------------------------------
+    # auto = LangGraph when installed, else the built-in runner (same nodes,
+    # same routing); langgraph / builtin force one engine.
+    agent_engine: Literal["auto", "langgraph", "builtin"] = "auto"
+    agent_max_tool_calls: int = Field(default=8, ge=1, le=16)
+    agent_stale_stats_days: int = Field(default=30, ge=1, le=3650)
+    # Optional LLM-written narrative on top of the deterministic report.
+    agent_use_llm: bool = False
+    # Human-approval policy for maintenance actions.
+    approval_ttl_seconds: int = Field(default=900, ge=1, le=86400)
+    # Executing an APPROVED action against a real Db2 needs a separate,
+    # privileged account and an explicit opt-in. Off by default: approvals are
+    # still recorded and audited, nothing is executed.
+    agent_actions_enabled: bool = False
+    db2_admin_user: str = Field(default="", validation_alias="DB2_ADMIN_USER")
+    db2_admin_password: SecretStr = Field(
+        default=SecretStr(""), validation_alias="DB2_ADMIN_PASSWORD"
+    )
+
     # --- Ollama models -----------------------------------------------------
     ollama_base_url: str = Field(
         default="http://127.0.0.1:11434", validation_alias="OLLAMA_BASE_URL"

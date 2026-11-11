@@ -13,6 +13,7 @@ import time
 from typing import Any, Sequence
 
 from app.adapters.base import (
+    AdminResult,
     DbaToolResult,
     ExecutionRecord,
     ExplainObject,
@@ -83,6 +84,7 @@ class MockDatabaseAdapter:
         self._closed = False
         self._lock = threading.Lock()
         self._executions: list[ExecutionRecord] = []
+        self.simulated_admin_statements: list[str] = []
         self._next_execution_id = 1
         self._execution_capacity = 500
 
@@ -174,6 +176,18 @@ class MockDatabaseAdapter:
             objects=objects,
             warnings=["Synthetic plan produced by the offline mock adapter, not by the Db2 optimizer."],
             latency_ms=(time.perf_counter() - start) * 1000,
+        )
+
+    def execute_admin_statement(self, statement: str) -> AdminResult:
+        """Simulate an approved maintenance action: NOTHING is executed."""
+        if self._closed:
+            raise RuntimeError("mock adapter closed")
+        with self._lock:
+            self.simulated_admin_statements.append(statement)
+        return AdminResult(
+            status="SIMULATED",
+            simulated=True,
+            detail="Mock mode: the statement was recorded but not executed against any database.",
         )
 
     # -- DBA tools (catalog + monitoring) ----------------------------------------

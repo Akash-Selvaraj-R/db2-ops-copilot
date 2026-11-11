@@ -51,8 +51,8 @@ Copy `.env.example` → `.env` for local overrides. Rules:
 | | `ADAPTER_MODE=mock` (default) | `ADAPTER_MODE=real` |
 |---|---|---|
 | Database | Canned demo tables, SELECT-only | `ibm_db` → Db2 (needs `requirements-integration.txt` + running instance) |
-| Vector store | In-memory keyword-overlap retrieval | `DB2VS` via langchain-db2 (wiring lands M2) |
-| Chat/embeddings | Deterministic canned text / hash vectors | Ollama `/api/chat`, `/api/embed` |
+| Vector store | In-memory keyword-overlap retrieval | `DB2VS` via langchain-db2 (contract implemented — **unverified**, never run against live Db2) |
+| Chat/embeddings | Deterministic canned text / hash vectors | Ollama `/api/chat`, `/api/embed` (chat also needs the LangChain stack from `requirements-integration.txt`; without it real-mode chat fails closed with 503 — never mock data) |
 | Audit | In-memory bounded trail | Db2 `APP_AUDIT` |
 | Probes | Always `ok` | Report **true** availability (`unavailable` if a service is down) |
 

@@ -270,6 +270,15 @@ def _identifier(name: str, value: Any) -> str:
     return value.strip().upper()
 
 
+def normalize_identifier(name: str, value: Any) -> str:
+    """Public: validate + upper-case a plain SQL identifier (raises ToolParamError)."""
+    return _identifier(name, value)
+
+
+def is_reserved_schema(schema: str) -> bool:
+    return schema.upper().startswith(_RESERVED_SCHEMA_PREFIXES)
+
+
 def resolve_params(
     spec: ToolSpec, supplied: dict[str, Any] | None, settings: Settings
 ) -> ResolvedParams:

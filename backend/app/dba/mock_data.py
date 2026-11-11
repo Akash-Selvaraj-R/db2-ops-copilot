@@ -11,10 +11,14 @@ Nothing here is produced by Db2; every consumer labels it ``source="mock"``.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-STATS_TS = "2026-10-30T09:00:00"
-STALE_TS = "2026-09-01T09:00:00"
+# Relative to "now" so the demo story never silently ages: statistics are
+# fresh (2 days) for most tables and stale (70 days) for DEMO_INCIDENTS.
+_NOW = datetime.now(timezone.utc).replace(microsecond=0, tzinfo=None)
+STATS_TS = (_NOW - timedelta(days=2)).isoformat()
+STALE_TS = (_NOW - timedelta(days=70)).isoformat()
 
 # (TABNAME, TYPE, CARD, NPAGES, FPAGES, OVERFLOW, STATS_TIME, TBSPACE)
 TABLES: list[tuple[Any, ...]] = [

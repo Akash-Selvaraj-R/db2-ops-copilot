@@ -30,6 +30,19 @@ def connect_args(settings: Settings) -> tuple[str, str, str]:
     )
 
 
+def admin_connect_args(settings: Settings) -> tuple[str, str, str]:
+    """``(dsn, user, password)`` for the privileged *maintenance* account.
+
+    Used ONLY by approved-action execution. Distinct from the read-only
+    account so the query path can never gain write privileges.
+    """
+    return (
+        build_dsn(settings),
+        settings.db2_admin_user,
+        settings.db2_admin_password.get_secret_value(),
+    )
+
+
 def sqlalchemy_url(settings: Settings):
     """SQLAlchemy URL for the ``ibm_db_sa`` dialect (``db2+ibm_db://``).
 
@@ -61,8 +74,11 @@ def sqlalchemy_url(settings: Settings):
 
 def sanitize(message: str, settings: Settings) -> str:
     """Strip any credential material from an error message."""
-    password = settings.db2_ro_password.get_secret_value()
     cleaned = message
-    if password:
-        cleaned = cleaned.replace(password, "***")
+    for secret in (
+        settings.db2_ro_password.get_secret_value(),
+        settings.db2_admin_password.get_secret_value(),
+    ):
+        if secret:
+            cleaned = cleaned.replace(secret, "***")
     return cleaned[:300]

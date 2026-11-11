@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.adapters.base import (
+    AdminResult,
     DbaToolResult,
     ExecutionRecord,
     ExplainObject,
@@ -54,7 +55,7 @@ from app.core.errors import (
     DbSqlError,
     UpstreamTimeoutError,
 )
-from app.database.dsn import connect_args, sanitize
+from app.database.dsn import admin_connect_args, connect_args, sanitize
 
 logger = logging.getLogger(__name__)
 
@@ -481,6 +482,66 @@ class Db2DatabaseAdapter:
             raise map_db_error(
                 exc, self._settings, action="Schema introspection", schema=schema
             ) from exc
+        finally:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001 — close is best-effort
+                pass
+
+    # -- approved maintenance actions ------------------------------------------
+    def execute_admin_statement(self, statement: str) -> AdminResult:
+        """Execute ONE human-approved maintenance statement as the admin account.
+
+        Preconditions enforced by the caller (approval service): the approval
+        was explicitly granted, ``prepare_action`` re-rendered and re-validated
+        the statement. Defense in depth here: refuses unless actions are
+        enabled AND admin credentials are configured, and executes a single
+        statement only. The read-only query path never uses this method.
+        """
+        if self._closed:
+            raise AdapterUnavailableError("Db2 adapter is closed.")
+        s = self._settings
+        if not s.agent_actions_enabled:
+            raise AdapterUnavailableError(
+                "Executing approved actions is disabled (AGENT_ACTIONS_ENABLED=false).",
+                detail={"code": "ACTIONS_DISABLED"},
+            )
+        if not s.db2_admin_user or not s.db2_admin_password.get_secret_value():
+            raise AdapterUnavailableError(
+                "No maintenance account configured (DB2_ADMIN_USER / DB2_ADMIN_PASSWORD).",
+                detail={"code": "ADMIN_NOT_CONFIGURED"},
+            )
+        if ";" in statement or not statement.strip():
+            raise DbSqlError("Exactly one statement may be executed.")
+        try:
+            import ibm_db_dbi
+        except ImportError as exc:
+            raise AdapterUnavailableError(
+                "ibm_db driver is not installed (requirements-integration.txt)."
+            ) from exc
+
+        start = time.perf_counter()
+        dsn, user, password = admin_connect_args(s)
+        try:
+            conn = ibm_db_dbi.connect(dsn, user, password)
+        except Exception as exc:
+            raise map_db_error(exc, s, action="Maintenance connection") from exc
+        try:
+            cursor = conn.cursor()
+            cursor.execute(statement)
+            conn.commit()
+            return AdminResult(
+                status="EXECUTED",
+                simulated=False,
+                detail="Statement executed by the maintenance account.",
+                latency_ms=(time.perf_counter() - start) * 1000,
+            )
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            raise map_db_error(exc, s, action="Maintenance action") from exc
         finally:
             try:
                 conn.close()

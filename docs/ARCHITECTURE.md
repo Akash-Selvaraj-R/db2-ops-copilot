@@ -1,7 +1,10 @@
 # Architecture — Db2 Ops Copilot
 
-**Status:** M1 baseline (portable foundation). Design targets Db2 + Ollama as
-first-class services; everything runs offline in mock mode meanwhile.
+**Status:** M3 approval/proposal workflow on top of the M2 feature set. Design
+targets Db2 + Ollama as first-class services; everything runs offline in mock
+mode meanwhile. **Verified offline only** (389 passed, 1 skipped) — real
+Db2/Ollama/DB2VS integration has never run on this machine. Proposal handling
+is deterministic; autonomous agent orchestration is not implemented.
 
 ## 1. Goals
 
@@ -16,28 +19,35 @@ first-class services; everything runs offline in mock mode meanwhile.
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ Frontend  (React 19 + TS + Vite SPA, /frontend/dist served @ /) │
-│   Dashboard · Chat workspace · Configuration                    │
+│   Dashboard · Chat · Configuration · Approvals                    │
 └──────────────────────────┬──────────────────────────────────────┘
                            │ HTTP JSON (CORS allow-list)
 ┌──────────────────────────▼──────────────────────────────────────┐
 │ API layer  (FastAPI, /api/v1)                                   │
-│   health · status · config · chat · sql/validate · audit        │
+│   health · status · config · chat · audit · ready               │
+│   sql/* · dba/tools · agent/propose · approvals · knowledge      │
 │   request-id middleware · unified error envelope · CORS         │
 ├─────────────────────────────────────────────────────────────────┤
 │ Services   ChatService · HealthService · StatusService          │
-│            SqlGuardService                                      │
+│            SqlGuardService · ExplainService · DbaService        │
+│            SqlExecutionService · ApprovalService                │
 ├─────────────────────────────────────────────────────────────────┤
 │ Security   prompt-injection screening (block/flag/off)          │
 │            sqlglot AST validation gate (fail-closed)            │
 ├─────────────────────────────────────────────────────────────────┤
 │ Adapters   Protocols in adapters/base.py — selected by registry │
 │   mock_*: offline & deterministic     real: Db2 · Ollama ·      │
-│                                   LangChain (M2-validated)      │
+│                                  LangChain (partial, unverified)│
 ├─────────────────────────────────────────────────────────────────┤
 │ Db2 (M2)   APP_AUDIT · KB_CHUNKS (VECTOR 768) · demo tables     │
 │            read-only account (db2ro) — grants are the boundary  │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+*Verification status: everything left of the mock/real split is
+offline-tested; the real adapters, LangChain orchestration and the Db2 schema
+are **implemented but unverified** — migrations are authored but have never
+been executed, and no live service was available on this machine.*
 
 ## 3. Key decisions (ADR-style)
 
@@ -74,7 +84,7 @@ Implemented in `app/adapters/sql_validator/sqlglot_validator.py`:
 5. Catalog deny-list — SYSCAT, SYSIBM, SYSSTAT, SYSPROC, SYSIBMADM, SYSIBMSECURITY, SYSTOOLS
 6. Function deny-list — `EXECUTEDIMMEDIATE`, `ADMIN_CMD`, `ADMIN_TASK`
 7. Complexity limits — AST nodes, joins, subqueries, IN-list length
-8. Row-limit advisory — warns when no `FETCH FIRST`/`LIMIT`; executor applies a hard cap anyway (M2)
+8. Row-limit advisory — warns when no `FETCH FIRST`/`LIMIT`; the executor applies a hard cap anyway (implemented in `SqlExecutionService`)
 
 **Beyond the gate (independent enforcement):** read-only Db2 account with
 explicit GRANTs (`database/migrations/003_readonly_user.sql`), hard row cap +
@@ -84,7 +94,7 @@ app-owned queries, prompt-injection defense on the NL surface, audit trail.
 **Honest limitation:** static validation cannot guarantee production security
 by itself; it is one layer. The database permission model is the boundary.
 
-## 6. Data model (Db2, authored — executed in M2)
+## 6. Data model (Db2, authored — **never executed**; real Db2 unverified)
 
 | Table | Purpose |
 |---|---|
@@ -99,21 +109,24 @@ by itself; it is one layer. The database permission model is the boundary.
 backend/app/
 ├── main.py               app factory, lifespan, middleware, static mount
 ├── core/                 config (pydantic-settings), errors, logging
-├── api/                  deps (DI), v1/ (health status config chat sql audit)
-├── services/             chat · health · status · sql_guard
+├── api/                  deps (DI), v1/ (health status config chat sql audit dba approvals knowledge)
+├── services/             chat · health · status · sql_guard · explain ·
+│                         sql_execution · dba · approval_service
+├── agent/                M3: state · intents · analysis · approvals · actions
 ├── adapters/
 │   ├── base.py           Protocols + value objects (the contracts)
 │   ├── registry.py       mock/real selection + parallel probes
-│   ├── db/               mock_db · db2_db (ibm_db, readonly exec + SYSCAT introspection)
-│   ├── vector/           mock_vector · db2_vector (DB2VS wiring → M2)
+│   ├── db/               mock_db · db2_db (ibm_db, readonly + approved-admin exec, SYSCAT introspection)
+│   ├── vector/           mock_vector · db2_vector (DB2VS contract implemented — unverified)
 │   ├── llm/              mock_llm · ollama_chat (/api/chat)
 │   ├── embeddings/       mock_embeddings · ollama_embeddings (/api/embed)
-│   ├── orchestration/    mock_orchestrator · langchain_orchestrator (RAG + text-to-SQL)
+│   ├── orchestration/    mock_orchestrator · langchain_orchestrator
+│   │                     (mock full; LangChain = partial retrieval legs, unverified)
 │   ├── audit/            mock_audit · db2_audit (APP_AUDIT)
 │   └── sql_validator/    sqlglot gate (always "real" — local compute)
 ├── security/             sql_policy (rules) · injection (prompt defense)
 ├── schemas/              strict pydantic request/response models
-└── database/             dsn builder + error sanitizer
+└── database/             dsn builder (ro/admin credential separation) + error sanitizer
 ```
 
 ## 8. Frontend
@@ -121,14 +134,33 @@ backend/app/
 React 19 + TypeScript (strict) + React Router + Vite. No CSS framework —
 design tokens in `styles.css`. The API client normalizes every failure into
 `ApiClientError` (code/message from the backend envelope), which drives
-consistent loading / error / empty states on all three pages.
+consistent loading / error / empty states across the dashboard, chat,
+configuration, and approval pages. The approval UI shows pending statements,
+explicit approve/reject controls, and mock/admin execution status.
 
-## 9. Deferred to M2 (explicitly)
+## 9. Integration status (implemented vs pending)
 
-- `DB2VS` construction inside `Db2VectorStoreAdapter` (langchain-db2),
+**Implemented as code and covered by offline tests:**
+
+- `DB2VS` construction inside `Db2VectorStoreAdapter` (langchain-db2 contract),
 - real query execution path: EXPLAIN dry-run, row-cap wrapping, timeout,
-  read-only account execution,
-- LangChain prompt templates + bounded self-repair loop validation against a
-  live model,
-- `APP_AUDIT` write/read verification, vector round-trip PoC,
-- Docker-based deployment (see DEPLOYMENT.md).
+  read-only account execution (`sql/execute` + `SqlExecutionService`),
+- approval workflow + privileged admin execution path (offline safety tests),
+- approval list/detail/decision API and deterministic, bounded action
+  proposals; proposal creation never executes an action,
+- bounded document ingestion against the existing mock vector adapter;
+  real-mode ingestion is disabled pending integration verification,
+- prompt-injection + SQL-gate layering.
+
+**Pending — needs live services (never validated on this machine):**
+
+- `DB2VS` round trip against a real Db2, `APP_AUDIT` write/read verification,
+- Ollama generation + embeddings latency/behavior,
+- LangChain prompt templates + bounded self-repair loop against a live model,
+- migrations execution, grants verification, Docker-based deployment
+  (see DEPLOYMENT.md).
+
+**Not implemented:** autonomous LangChain/LangGraph agent execution. Approval
+records are in-memory and lost on restart. Real privileged actions and real
+knowledge ingestion remain disabled/unverified; no live Db2 connection was
+used for this implementation.

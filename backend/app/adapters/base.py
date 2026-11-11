@@ -132,6 +132,16 @@ class DbaToolResult:
 
 
 @dataclass(slots=True)
+class AdminResult:
+    """Outcome of executing one APPROVED maintenance statement."""
+
+    status: str  # EXECUTED | SIMULATED
+    simulated: bool
+    detail: str
+    latency_ms: float = 0.0
+
+
+@dataclass(slots=True)
 class DocumentInput:
     text: str
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -240,6 +250,15 @@ class DatabaseAdapter(Protocol):
         Returns True when the server accepted the plan, False otherwise.
         NEVER raises: the dry-run is advisory (accounts often lack EXPLAIN
         privileges / plan tables) and must not block execution.
+        """
+
+    def execute_admin_statement(self, statement: str) -> AdminResult:
+        """Execute ONE human-approved maintenance statement (RUNSTATS, CREATE INDEX).
+
+        Only ``app.services.approval_service`` may call this, after the
+        approval state machine and ``app.agent.actions.prepare_action``
+        re-validation. The mock simulates; the real adapter uses the separate
+        privileged account and raises when it is not configured.
         """
 
     def explain_plan(self, sql: str, timeout_ms: int | None = None) -> ExplainResult:

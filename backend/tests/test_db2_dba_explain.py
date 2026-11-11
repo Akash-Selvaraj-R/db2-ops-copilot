@@ -292,22 +292,36 @@ def test_closed_adapter_explain_is_unavailable(dbi):
 
 # ===================================================================================
 # SQLAlchemy / ibm_db_sa URL helper
+#
+# Unit test: URL construction ONLY. Never call create_engine() here — that
+# loads the ibm_db_sa dialect and the native ibm_db driver, which some
+# hosts block (Application Control). Driver/dialect loading lives in the
+# explicitly marked integration test (test_db2_dialect_integration.py).
 # ===================================================================================
 def test_sqlalchemy_url_uses_ibm_db_sa_dialect_and_masks_password():
-    from sqlalchemy import create_engine
+    from sqlalchemy.engine import URL
 
     from app.database.dsn import sqlalchemy_url
 
     settings = real_settings(db2_host="db.example.test", db2_port=50001, db2_dbname="prod")
     url = sqlalchemy_url(settings)
     secret = settings.db2_ro_password.get_secret_value()
+
+    assert isinstance(url, URL)
     assert url.drivername == "db2+ibm_db"
     assert (url.host, url.port, url.database) == ("db.example.test", 50001, "prod")
     assert url.username == settings.db2_ro_user
-    assert secret not in repr(url) and secret not in str(url)
-    # Dialect resolves through ibm_db_sa; create_engine is lazy (no connection).
-    engine = create_engine(url)
-    assert engine.dialect.name == "ibm_db_sa"
+
+    # The credential IS carried inside the URL object (not dropped)...
+    assert url.password == secret
+    assert secret in url.render_as_string(hide_password=False)
+
+    # ...but every supported rendering masks it.
+    assert secret not in repr(url)
+    assert secret not in str(url)
+    assert secret not in url.render_as_string()  # default: hide_password=True
+    masked = url.render_as_string(hide_password=True)
+    assert secret not in masked and "***" in masked
 
 
 # ===================================================================================

@@ -62,7 +62,7 @@ APP
 ## The DB2VS vector-store mechanism (verified, not invented)
 
 `langchain-db2`'s `DB2VS` manages **its own table layout** (verified against
-the package source — see `docs/VECTOR_STORE.md`):
+the package source — see `M2_REPO_AUDIT.md` §1):
 
 - Constructor: `DB2VS(embedding_function, table_name, client=<ibm_db_dbi
   Connection>, distance_strategy=DistanceStrategy.COSINE, ...)` — it embeds

@@ -1,7 +1,9 @@
 # Deployment
 
-> **M1 status:** nothing here has been executed yet — infrastructure is
-> installed only on an approved machine (M2). This document is the runbook.
+> **Status: runbook only — never executed.** As of M3 no infrastructure
+> exists on the development machine (no Db2, no Ollama, migrations never
+> run), so every step below is an *unverified* procedure to be performed on
+> an operator-approved machine.
 
 ## 1. Prerequisites (user-facing list)
 
@@ -44,7 +46,7 @@ Copy-Item .env.example .env    # then fill DB2_RO_PASSWORD etc. (local secrets o
 
 # 5. Run with REAL adapters
 $env:ADAPTER_MODE = "real"
-cd backend; python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+cd backend; ..\.venv\Scripts\python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
 Health check first: `GET /api/v1/health` must show `mode: real` with truthful

@@ -9,6 +9,10 @@
 
 import type {
   ApiErrorBody,
+  AgentProposalRequest,
+  AgentProposalResponse,
+  ApprovalDecisionResponse,
+  ApprovalListResponse,
   AuditResponse,
   ChatRequest,
   ChatResponse,
@@ -72,6 +76,24 @@ export const api = {
   config: () => request<ConfigResponse>("/api/v1/config"),
   audit: (limit = 25) =>
     request<AuditResponse>(`/api/v1/audit?limit=${encodeURIComponent(limit)}`),
+  approvals: () => request<ApprovalListResponse>("/api/v1/approvals"),
+  proposeActions: (payload: AgentProposalRequest) =>
+    request<AgentProposalResponse>("/api/v1/agent/propose", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  decideApproval: (
+    approvalId: string,
+    decision: "approve" | "reject",
+    actor?: string,
+  ) =>
+    request<ApprovalDecisionResponse>(
+      `/api/v1/approvals/${encodeURIComponent(approvalId)}/decision`,
+      {
+        method: "POST",
+        body: JSON.stringify({ decision, actor }),
+      },
+    ),
   validateSql: (sql: string) =>
     request<SqlValidateResponse>("/api/v1/sql/validate", {
       method: "POST",
